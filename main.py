@@ -40,6 +40,7 @@ class TaskManager:
         self._paused = False
         self._pause_event: Optional[asyncio.Event] = None
         self._task_context: Optional[dict] = None  # 保存暂停时的上下文
+        self._task_start_time: float = 0  # 任务开始时间
 
     @property
     def is_processing(self) -> bool:
@@ -53,6 +54,10 @@ class TaskManager:
     def current_input(self) -> Optional[str]:
         return self._current_input
 
+    @property
+    def task_start_time(self) -> float:
+        return self._task_start_time
+
     def start_task(self, task: asyncio.Task, user_input: str):
         """开始新任务"""
         self._current_task = task
@@ -62,6 +67,7 @@ class TaskManager:
         self._paused = False
         self._pause_event = asyncio.Event()
         self._pause_event.set()  # 初始状态：不暂停
+        self._task_start_time = time.time()  # 记录开始时间
 
     def end_task(self):
         """结束当前任务"""
@@ -118,6 +124,7 @@ class TaskManager:
         1. 默认不打断（COMMENT），只有明确的取消意图才打断
         2. 识别评论/感叹类输入，这类不应该打断任务
         3. 识别附和/应答类输入，保持任务继续
+        4. 识别用户等待中的疑问，给与回应
 
         基于关键词的快速分类（同步方法，用于快速判断）
         """
@@ -125,6 +132,19 @@ class TaskManager:
             return UserIntent.REPLACE
 
         text = new_input.lower().strip()
+
+        # === 0. 首先检测用户在等待中的疑问 ===
+        # "有人在吗？"、"太慢了" 这类输入需要Talker回应
+        waiting_questions = [
+            "有人在", "在吗", "在不在", "人呢", "还在吗",
+            "慢", "太慢", "好慢", "怎么这么慢", "等好久了",
+            "好了吗", "怎么样了", "完成没", "进度",
+        ]
+        if any(q in text for q in waiting_questions):
+            # 这类是查询状态或抱怨等待，需要Talker回应
+            if any(q in text for q in ["吗", "？", "?", "在"]):
+                return UserIntent.QUERY_STATUS  # 当作查询状态处理
+            return UserIntent.COMMENT  # 其他抱怨当作评论
 
         # === 1. 首先检测附和/应答（最不打断） ===
         backchannel_patterns = [
@@ -159,7 +179,7 @@ class TaskManager:
         # === 4. 查询状态 ===
         status_keywords = [
             "进度", "怎么样", "好了吗", "完成没", "状态", "多久",
-            "还在吗", "到哪了",
+            "还在吗", "到哪了", "在不在",
         ]
         if any(kw in text for kw in status_keywords):
             return UserIntent.QUERY_STATUS
@@ -428,27 +448,38 @@ class TalkerThinkerApp:
         处理任务进行中的新输入
 
         关键改进：
-        - COMMENT和BACKCHANNEL不打断任务
+        - COMMENT和BACKCHANNEL不打断任务，但Talker应该回应
         - 只有REPLACE才真正取消任务
+        - 用户的问题应该得到实时反馈
 
         Returns:
             tuple: (是否已处理, 响应内容)
         """
         intent = self.task_manager.classify_intent(new_input)
+        current = self.task_manager.current_input or "您的请求"
 
         if intent == UserIntent.COMMENT:
-            # 评论/感叹，不打断任务，静默记录
-            # 可以选择性地给简短反馈，但不要打断
-            return True, None  # None表示不输出任何内容，保持安静
+            # 评论/感叹，不打断任务，但Talker应该简短回应
+            # 根据评论内容生成简短回应
+            text = new_input.lower()
+            if "慢" in text:
+                return True, "\n[Talker] 抱歉让您久等了，正在加速处理..."
+            elif "在" in text and ("吗" in text or "?" in text or "？" in text):
+                return True, "\n[Talker] 在的！正在为您处理，请稍候..."
+            elif any(w in text for w in ["好", "不错", "行", "可以"]):
+                return True, "\n[Talker] 好的，继续处理中..."
+            else:
+                # 其他评论，简短确认
+                return True, None  # 静默，不打断
 
         elif intent == UserIntent.BACKCHANNEL:
-            # 附和/应答，不打断任务
-            return True, None  # 完全静默
+            # 附和/应答，简短回应
+            return True, "\n[Talker] 嗯，继续..."
 
         elif intent == UserIntent.QUERY_STATUS:
-            # 查询状态，不取消任务
-            current = self.task_manager.current_input
-            return True, f"\n[系统] 正在处理: {current[:50]}... 请稍候"
+            # 查询状态，给详细反馈
+            elapsed = time.time() - self.task_manager.task_start_time
+            return True, f"\n[Talker] 正在处理「{current[:30]}...」，已用时{elapsed:.0f}秒，请稍候"
 
         elif intent == UserIntent.REPLACE:
             # 取消当前任务，处理新任务
@@ -460,26 +491,25 @@ class TalkerThinkerApp:
             return False, None  # 返回False表示需要处理新任务
 
         elif intent == UserIntent.MODIFY:
-            # 补充信息，记录但不取消任务
-            # TODO: 实际实现应该将补充信息传递给正在运行的任务
-            return True, "\n[系统] 已收到补充信息"
+            # 补充信息，确认收到
+            return True, f"\n[Talker] 收到补充信息「{new_input[:20]}」，已更新处理中..."
 
         elif intent == UserIntent.PAUSE:
             # 暂停当前任务
             await self.task_manager.pause_current_task()
-            return True, "\n[系统] 任务已暂停，发送'继续'可恢复"
+            return True, "\n[Talker] 好的，已暂停。说'继续'可以恢复"
 
         elif intent == UserIntent.RESUME:
             # 恢复当前任务
             if self.task_manager.is_paused:
                 await self.task_manager.resume_current_task()
-                return True, "\n[系统] 任务已恢复"
+                return True, "\n[Talker] 好的，继续处理..."
             else:
-                return True, "\n[系统] 当前没有暂停的任务"
+                return True, "\n[Talker] 当前没有暂停的任务哦"
 
         else:  # CONTINUE
             # 继续当前任务
-            return True, None
+            return True, f"\n[Talker] 收到，继续处理「{current[:30]}...」"
 
     async def run_interactive(self) -> None:
         """
