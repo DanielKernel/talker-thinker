@@ -301,9 +301,6 @@ class TalkerAgent:
             yield "请先配置API密钥。在 .env 文件中设置 VOLCES_API_KEY 或 OPENAI_API_KEY。"
             return
 
-        # 立即给出反馈（<100ms）
-        yield "收到，让我查一下..."
-
         prompt = self._build_response_prompt(user_input, context, "quick")
 
         try:
@@ -408,9 +405,6 @@ class TalkerAgent:
         if not self._api_key_configured:
             yield "请先配置API密钥。在 .env 文件中设置 VOLCES_API_KEY 或 OPENAI_API_KEY。"
             return
-
-        # 立即给出反馈
-        yield "好的，让我想想这个问题...\n"
 
         prompt = self._build_response_prompt(user_input, context, "medium")
 
