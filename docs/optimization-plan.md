@@ -60,30 +60,54 @@ while not thinker_complete:
 
 #### 1.3.2 动态播报间隔
 
-根据已耗时动态调整间隔（上限4秒）：
-- 0-10秒：2.5秒间隔（初始频繁更新）
-- 10-20秒：3.0秒间隔（中期稳定）
-- 20秒+：4.0秒间隔（后期上限）
+根据已耗时动态调整间隔（更保守策略，避免重复）：
+- 0-10秒：4秒间隔（初始）
+- 10-20秒：5秒间隔（中期）
+- 20-40秒：6秒间隔（后期）
+- 40秒+：8秒间隔（长时间任务）
 
 ```python
 def get_broadcast_interval(elapsed: float) -> float:
     if elapsed < 10:
-        return 2.5  # 初始2.5秒
+        return 4.0  # 初始4秒
     elif elapsed < 20:
-        return 3.0  # 中期3秒
+        return 5.0  # 中期5秒
+    elif elapsed < 40:
+        return 6.0  # 后期6秒
     else:
-        return 4.0  # 后期4秒（上限）
+        return 8.0  # 长时间任务8秒
 ```
 
-#### 1.3.3 内容哈希去重
+#### 1.3.3 消息去重机制（⭐重要修复）
 
-使用 `阶段 + 步骤 + 时间桶(5秒)` 生成哈希，避免重复播报：
+**问题**：之前仅使用时间桶去重，导致同一时间桶内消息可能重复
+
+**解决方案**：双重去重机制
+1. **时间哈希**：`阶段 + 步骤 + 时间桶(5秒)` 避免频繁播报
+2. **消息追踪**：按阶段记录已使用的消息，确保不重复
 
 ```python
-def _hash_broadcast_content(self, stage: ThinkerStage, step: int, elapsed: float) -> str:
-    elapsed_bucket = int(elapsed // 5) * 5  # 每5秒一个桶
-    return f"{stage.value}_{step}_{elapsed_bucket}"
+@dataclass
+class ProgressState:
+    # ...
+    used_messages: Dict[str, set] = field(default_factory=dict)  # 按阶段记录已使用的消息
+
+def get_unused_message(msgs: list, used_set: set) -> str:
+    """从未使用的消息中选择一个，如果都用过则重置"""
+    for msg in msgs:
+        if msg not in used_set:
+            used_set.add(msg)
+            return msg
+    # 所有消息都用过了，清空并重新开始
+    used_set.clear()
+    used_set.add(msgs[0])
+    return msgs[0]
 ```
+
+**关键改进**：
+- 每个阶段最多5条不同消息
+- 同一阶段内不重复播报相同内容
+- 带时间的消息（如"分析进行中 (64s)..."）自然不重复
 
 #### 1.3.4 多样化播报消息
 
@@ -528,6 +552,7 @@ class Orchestrator:
 用户: 帮我选一款适合家用的SUV
 
 [Talker] 好的，需要深度分析，已转交给Thinker处理
+[Thinker] 开始处理...                    ⭐新增：Thinker立即响应
 [Thinker] [思考] 正在分析任务...
 
 [Talker] Thinker正在分析您的需求...
@@ -552,6 +577,41 @@ class Orchestrator:
 [Thinker] [步骤2] 对比车型性能...
 
 [Thinker] [答案] 推荐...
+```
+
+### 4.5 SharedContext使用（⭐修复）
+
+**问题**：SharedContext创建但未实际被Thinker更新
+
+**解决方案**：Thinker在处理过程中主动更新共享上下文
+
+```python
+# agents/thinker/agent.py
+class ThinkerAgent:
+    def __init__(self, ...):
+        self._shared_context = None  # 共享上下文引用
+
+    def set_shared_context(self, shared_context) -> None:
+        """设置共享上下文"""
+        self._shared_context = shared_context
+
+    async def process(self, user_input, context, ...):
+        # 获取共享上下文
+        shared = context.get("shared") if context else None
+        if shared:
+            self._shared_context = shared
+
+        # 各阶段更新进度
+        yield "[思考] 正在分析任务...\n"
+        if shared:
+            shared.update_thinker_progress(stage="analyzing")
+
+        # ...
+
+        if shared:
+            shared.update_thinker_progress(stage="planning", total=len(plan.steps))
+
+        # ...
 ```
 
 ### 4.5 实现步骤
@@ -840,6 +900,20 @@ python main.py -i
 
 ## 9. 更新日志
 
+### 2026-02-20（第四次更新）
+- **播报去重大幅改进**（重要）：
+  - 新增`used_messages`按阶段追踪已使用消息
+  - 播报间隔从2.5-4秒调整为4-8秒（更保守）
+  - 每阶段最多5条不同消息
+  - 修复"即将完成分析..."等消息重复问题
+- **Thinker立即响应**：
+  - Thinker接收任务后立即输出"开始处理..."
+  - 修复Talker转交后Thinker无响应问题
+- **SharedContext真正启用**：
+  - Thinker在各阶段主动更新shared context
+  - 添加`set_shared_context()`方法
+  - 共享上下文现在真正起作用
+
 ### 2026-02-20（第三次更新）
 - **智能打断机制优化**（重要）：
   - 新增COMMENT和BACKCHANNEL意图类型
@@ -877,11 +951,11 @@ python main.py -i
 
 | 文件 | 修改内容 |
 |------|----------|
-| `orchestrator/coordinator.py` | 集成SessionContext、SharedContext、Skills、Summarizer |
+| `orchestrator/coordinator.py` | 集成SessionContext、SharedContext、Skills、Summarizer、播报去重优化、Thinker立即响应 |
 | `context/session_context.py` | 支持Redis/内存双模式 |
 | `context/__init__.py` | 导出SharedContext |
-| `agents/thinker/agent.py` | 添加澄清检测和问题生成方法 |
-| `agents/talker/agent.py` | 改进记忆处理 |
+| `agents/thinker/agent.py` | 添加澄清检测、问题生成方法、set_shared_context、各阶段更新共享上下文 |
+| `agents/talker/agent.py` | 改进记忆处理、添加set_shared_context方法 |
 | `main.py` | 添加LLM意图分类、暂停/恢复机制、智能打断机制 |
 
 ---

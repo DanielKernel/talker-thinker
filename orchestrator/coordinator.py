@@ -51,6 +51,7 @@ class ProgressState:
     step_description: str = ""
     broadcast_history: set = field(default_factory=set)  # 用于去重
     last_content_hash: str = ""  # 用于内容去重
+    used_messages: Dict[str, set] = field(default_factory=dict)  # 按阶段记录已使用的消息
 
 
 @dataclass
@@ -197,10 +198,17 @@ class Orchestrator:
         """
         根据阶段生成播报消息（基于上下文的动态消息）
         关键改进：根据时间进度生成不同风格的播报，避免重复
+        使用已使用消息追踪来避免重复
         """
         # 提取主题
         topic = self._extract_topic(user_query)
-        broadcast_count = self._progress_state.broadcast_count
+        stage_key = stage.value
+
+        # 获取该阶段已使用的消息集合
+        if stage_key not in self._progress_state.used_messages:
+            self._progress_state.used_messages[stage_key] = set()
+
+        used = self._progress_state.used_messages[stage_key]
 
         # 根据已耗时选择播报风格
         if elapsed_time < 8:
@@ -211,6 +219,17 @@ class Orchestrator:
             style = "reassure"
         else:
             style = "urgent"
+
+        def get_unused_message(msgs: list, used_set: set) -> str:
+            """从未使用的消息中选择一个，如果都用过则重置"""
+            for msg in msgs:
+                if msg not in used_set:
+                    used_set.add(msg)
+                    return msg
+            # 所有消息都用过了，清空并重新开始
+            used_set.clear()
+            used_set.add(msgs[0])
+            return msgs[0]
 
         if stage == ThinkerStage.ANALYZING:
             if style == "initial":
@@ -225,11 +244,11 @@ class Orchestrator:
                     "正在提取关键要素...",
                 ]
             else:
+                # 每次生成带时间的唯一消息，自然不会重复
                 msgs = [
                     f"分析进行中 ({elapsed_time:.0f}s)...",
-                    "即将完成分析...",
                 ]
-            return msgs[broadcast_count % len(msgs)]
+            return get_unused_message(msgs, used)
 
         elif stage == ThinkerStage.PLANNING:
             if style == "initial":
@@ -245,9 +264,8 @@ class Orchestrator:
             else:
                 msgs = [
                     f"规划中 ({elapsed_time:.0f}s)...",
-                    "即将开始执行...",
                 ]
-            return msgs[broadcast_count % len(msgs)]
+            return get_unused_message(msgs, used)
 
         elif stage == ThinkerStage.EXECUTING:
             if total_steps > 0 and current_step > 0:
@@ -256,12 +274,12 @@ class Orchestrator:
                     short_desc = step_desc[:15] + "..." if len(step_desc) > 15 else step_desc
                     return f"第{current_step}/{total_steps}步: {short_desc} ({progress_pct}%)"
                 return f"执行中: {current_step}/{total_steps} 步 ({progress_pct}%)"
+            # 没有步骤信息时使用通用消息
             msgs = [
                 "正在处理核心任务...",
                 "执行关键步骤...",
-                f"处理中 ({elapsed_time:.0f}s)...",
             ]
-            return msgs[broadcast_count % len(msgs)]
+            return get_unused_message(msgs, used)
 
         elif stage == ThinkerStage.SYNTHESIZING:
             msgs = [
@@ -270,7 +288,7 @@ class Orchestrator:
                 "即将完成，请稍候...",
                 "整理输出内容...",
             ]
-            return msgs[broadcast_count % len(msgs)]
+            return get_unused_message(msgs, used)
 
         elif stage == ThinkerStage.COMPLETED:
             return "处理完成！"
@@ -323,13 +341,22 @@ class Orchestrator:
         state = self._progress_state
         current_time = time.time()
 
-        # 动态计算播报间隔：初始频繁，后期稳定
+        # 动态计算播报间隔：初始适中，后期延长
         def get_min_interval(elapsed: float, stage: ThinkerStage) -> float:
             """根据耗时和阶段动态计算最小间隔"""
-            base_interval = 2.5 if elapsed < 10 else (3.0 if elapsed < 20 else 4.0)
+            # 更保守的间隔策略
+            if elapsed < 10:
+                base_interval = 4.0  # 初始4秒
+            elif elapsed < 20:
+                base_interval = 5.0  # 中期5秒
+            elif elapsed < 40:
+                base_interval = 6.0  # 后期6秒
+            else:
+                base_interval = 8.0  # 长时间任务8秒
+
             # 规划阶段可能需要更长时间，稍微延长间隔
             if stage == ThinkerStage.PLANNING:
-                base_interval = min(base_interval + 0.5, 4.0)
+                base_interval = min(base_interval + 1.0, 10.0)
             return base_interval
 
         min_interval = get_min_interval(elapsed_time, new_stage)
@@ -345,8 +372,12 @@ class Orchestrator:
         # 同阶段内，检查时间间隔
         time_since_last = current_time - state.last_broadcast
         if time_since_last >= min_interval:
-            # 限制总播报次数（防止无限播报）
-            if state.broadcast_count < 10:
+            # 限制每阶段的播报次数
+            stage_key = new_stage.value
+            stage_broadcast_count = len(state.used_messages.get(stage_key, set()))
+            max_broadcasts_per_stage = 5  # 每阶段最多5条不同消息
+
+            if stage_broadcast_count < max_broadcasts_per_stage:
                 return True, "interval_elapsed"
 
         return False, "skip"
@@ -559,10 +590,16 @@ class Orchestrator:
         first_timestamp_shown = False
         last_broadcast_time = llm_request_time
         broadcast_count = 0
+        used_broadcast_msgs = set()  # 追踪已使用的消息
 
         def get_talker_broadcast_interval(elapsed: float) -> float:
             """动态计算播报间隔"""
-            return 2.5 if elapsed < 10 else (3.0 if elapsed < 20 else 4.0)
+            if elapsed < 10:
+                return 4.0  # 初始4秒
+            elif elapsed < 20:
+                return 5.0  # 中期5秒
+            else:
+                return 6.0  # 后期6秒
 
         while not talker_complete or not talker_queue.empty():
             current_time = time.time()
@@ -573,18 +610,35 @@ class Orchestrator:
             if current_time - last_broadcast_time >= broadcast_interval:
                 ts = format_timestamp(current_time)
 
-                # 根据时间动态选择播报内容
+                # 根据时间动态选择播报内容，避免重复
                 if elapsed < 10:
-                    msgs = ["正在处理...", "思考中..."]
+                    all_msgs = ["正在处理...", "思考中..."]
                 elif elapsed < 20:
-                    msgs = [f"仍在处理中 ({elapsed:.0f}s)...", "请稍候..."]
+                    all_msgs = ["仍在处理中...", "请稍候..."]
                 else:
-                    msgs = [f"响应较慢 ({elapsed:.0f}s)...", "即将完成..."]
+                    # 长时间任务，带时间提示
+                    all_msgs = [f"响应较慢 ({elapsed:.0f}s)..."]
 
-                msg = msgs[broadcast_count % len(msgs)]
+                # 选择一个未使用的消息
+                msg = None
+                for m in all_msgs:
+                    if m not in used_broadcast_msgs:
+                        msg = m
+                        used_broadcast_msgs.add(m)
+                        break
+
+                if msg is None:
+                    # 所有消息都用过了，清空重来（但这不应该频繁发生）
+                    used_broadcast_msgs.clear()
+                    msg = all_msgs[0]
+
                 yield f"\n[{ts}] Talker: {msg}"
                 last_broadcast_time = current_time
                 broadcast_count += 1
+
+                # 限制最大播报次数
+                if broadcast_count >= 8:
+                    break
 
             # 尝试获取输出
             try:
@@ -697,6 +751,10 @@ class Orchestrator:
         # 获取共享上下文
         shared = context.get("shared")
 
+        # 确保Thinker有共享上下文的引用
+        if shared:
+            self.thinker.set_shared_context(shared)
+
         # Talker首先给用户反馈
         if settings.SHOW_AGENT_IDENTITY:
             timestamp = format_timestamp(thinker_start)
@@ -739,6 +797,10 @@ class Orchestrator:
             "thinker",
             "启动协作模式",
         )
+
+        # Thinker开始工作的提示
+        ts = format_timestamp(time.time())
+        yield f"\n[{ts}] Thinker: 开始处理..."
 
         # 收集Thinker的输出
         thinker_output = []

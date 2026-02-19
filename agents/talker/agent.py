@@ -69,6 +69,9 @@ class TalkerAgent:
         # 进度回调
         self._progress_callback: Optional[Callable] = None
 
+        # 共享上下文引用（由外部设置）
+        self._shared_context = None
+
         # 统计信息
         self._stats = {
             "total_requests": 0,
@@ -80,6 +83,10 @@ class TalkerAgent:
     def set_progress_callback(self, callback: Callable) -> None:
         """设置进度回调函数"""
         self._progress_callback = callback
+
+    def set_shared_context(self, shared_context) -> None:
+        """设置共享上下文"""
+        self._shared_context = shared_context
 
     async def process(
         self,

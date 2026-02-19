@@ -66,6 +66,9 @@ class ThinkerAgent:
         # 技能调用器（可选）
         self._skill_invoker = None
 
+        # 共享上下文引用（由外部设置）
+        self._shared_context = None
+
         # 统计信息
         self._stats = {
             "total_tasks": 0,
@@ -75,6 +78,10 @@ class ThinkerAgent:
             "refinements": 0,
             "total_latency_ms": 0,
         }
+
+    def set_shared_context(self, shared_context) -> None:
+        """设置共享上下文"""
+        self._shared_context = shared_context
 
     def set_progress_callback(self, callback: Callable) -> None:
         """设置进度回调函数"""
@@ -102,6 +109,11 @@ class ThinkerAgent:
         self._stats["total_tasks"] += 1
         start_time = time.time()
 
+        # 获取共享上下文（从context中提取）
+        shared = context.get("shared") if context else None
+        if shared:
+            self._shared_context = shared
+
         # 累计指标
         total_input_tokens = 0
         total_output_tokens = 0
@@ -111,6 +123,8 @@ class ThinkerAgent:
         try:
             # 1. 任务规划
             yield "[思考] 正在分析任务...\n"
+            if shared:
+                shared.update_thinker_progress(stage="analyzing")
             plan_start = time.time()
             plan = await self.plan_task(user_input, context)
             plan_time = (time.time() - plan_start) * 1000
@@ -120,6 +134,8 @@ class ThinkerAgent:
             # 2. 展示规划
             yield f"\n[规划] 任务目标: {plan.intent}\n"
             yield f"[规划] 共{len(plan.steps)}个步骤\n\n"
+            if shared:
+                shared.update_thinker_progress(stage="planning", total=len(plan.steps))
 
             # 3. 逐步执行
             step_results: List[StepResult] = []
@@ -128,6 +144,8 @@ class ThinkerAgent:
                 progress = 10 + (step_num / len(plan.steps)) * 70
 
                 yield f"[步骤{step_num}] {step.get('name', '执行中...')}...\n"
+                if shared:
+                    shared.update_thinker_progress(stage="executing", step=step_num, total=len(plan.steps))
                 await self._report_progress(
                     f"执行步骤{step_num}/{len(plan.steps)}",
                     progress,
@@ -152,6 +170,8 @@ class ThinkerAgent:
 
             # 4. 生成最终答案
             yield "\n[思考] 整合结果，生成最终答案...\n"
+            if shared:
+                shared.update_thinker_progress(stage="synthesizing")
             await self._report_progress("生成最终答案", 85)
 
             answer_start = time.time()
@@ -188,6 +208,8 @@ class ThinkerAgent:
 
             # 6. 输出最终结果
             await self._report_progress("完成", 100)
+            if shared:
+                shared.update_thinker_progress(stage="completed")
             self._stats["successful_tasks"] += 1
 
             yield "\n[答案]\n"
