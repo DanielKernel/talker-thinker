@@ -190,13 +190,28 @@ class AnthropicClient(LLMClient):
     async def _get_client(self):
         if self._client is None:
             import httpx
+            import os
             from anthropic import AsyncAnthropic
 
-            # 创建独立的 HTTP 客户端
-            self._http_client = httpx.AsyncClient(
-                timeout=httpx.Timeout(60.0, connect=10.0),
-                limits=httpx.Limits(max_connections=10, max_keepalive_connections=5),
-            )
+            # 临时禁用代理环境变量，避免代理导致的问题
+            proxy_vars = ['http_proxy', 'https_proxy', 'HTTP_PROXY', 'HTTPS_PROXY',
+                          'all_proxy', 'ALL_PROXY', 'no_proxy', 'NO_PROXY']
+            saved_proxy = {k: os.environ.get(k) for k in proxy_vars}
+            for k in proxy_vars:
+                os.environ.pop(k, None)
+
+            try:
+                # 创建独立的 HTTP 客户端（不带代理）
+                self._http_client = httpx.AsyncClient(
+                    timeout=httpx.Timeout(60.0, connect=10.0),
+                    limits=httpx.Limits(max_connections=10, max_keepalive_connections=5),
+                    proxy=None,  # 明确禁用代理
+                )
+            finally:
+                # 恢复代理环境变量
+                for k, v in saved_proxy.items():
+                    if v is not None:
+                        os.environ[k] = v
 
             self._client = AsyncAnthropic(
                 api_key=self._api_key,
