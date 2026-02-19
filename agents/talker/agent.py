@@ -39,10 +39,20 @@ class TalkerAgent:
         api_key: Optional[str] = None,
         base_url: Optional[str] = None,
     ):
+        # 获取API密钥
+        effective_api_key = api_key or settings.VOLCES_API_KEY or settings.OPENAI_API_KEY
+
+        # 检查API密钥是否有效
+        if not effective_api_key or effective_api_key.startswith("your-"):
+            print("警告: 未配置有效的API密钥，请在 .env 文件中设置 VOLCES_API_KEY 或 OPENAI_API_KEY")
+            self._api_key_configured = False
+        else:
+            self._api_key_configured = True
+
         self.llm = llm_client or create_llm_client(
             provider="openai",
             model=model or settings.TALKER_MODEL,
-            api_key=api_key or settings.VOLCES_API_KEY or settings.OPENAI_API_KEY,
+            api_key=effective_api_key,
             base_url=base_url or settings.LLM_BASE_URL,
         )
         self.name = "talker"
@@ -176,10 +186,18 @@ class TalkerAgent:
         if any(q in text for q in simple_queries) and len(text) < 30:
             return TaskComplexity.SIMPLE
 
-        # 复杂关键词 -> 复杂
+        # 需要详细回答的关键词 -> MEDIUM（不一定是COMPLEX）
+        detail_keywords = [
+            "什么", "哪些", "特点", "特征", "功能", "介绍",
+            "解释", "说明", "怎样", "如何", "为什么",
+        ]
+        if any(k in text for k in detail_keywords):
+            return TaskComplexity.MEDIUM
+
+        # 复杂关键词 -> COMPLEX
         complex_keywords = [
             "分析", "比较", "评估", "设计", "规划", "优化",
-            "为什么", "怎么理解", "深入", "详细解释", "原理解析",
+            "深入", "详细解释", "原理解析",
             "多步", "步骤", "方案", "策略",
         ]
         if any(k in text for k in complex_keywords):
@@ -189,6 +207,7 @@ class TalkerAgent:
         if len(text) > 100:
             return TaskComplexity.MEDIUM
 
+        # 默认返回None，让LLM分类
         return None
 
     def _build_classification_prompt(
@@ -234,17 +253,26 @@ class TalkerAgent:
         context: Optional[Dict[str, Any]] = None,
     ) -> AsyncIterator[str]:
         """快速响应（简单任务）"""
+        # 检查API密钥
+        if not self._api_key_configured:
+            yield "请先配置API密钥。在 .env 文件中设置 VOLCES_API_KEY 或 OPENAI_API_KEY。"
+            return
+
         prompt = self._build_response_prompt(user_input, context, "quick")
 
         try:
+            has_content = False
             async for chunk in self.llm.stream_generate(
                 prompt,
                 max_tokens=200,
                 temperature=self.temperature,
             ):
+                has_content = True
                 yield chunk
-        except Exception:
-            yield "好的，我了解了。"
+            if not has_content:
+                yield "抱歉，我暂时无法连接到模型服务。"
+        except Exception as e:
+            yield f"抱歉，处理时出现问题：{str(e)}"
 
     async def _medium_response(
         self,
@@ -252,20 +280,29 @@ class TalkerAgent:
         context: Optional[Dict[str, Any]] = None,
     ) -> AsyncIterator[str]:
         """中等复杂度响应"""
+        # 检查API密钥
+        if not self._api_key_configured:
+            yield "请先配置API密钥。在 .env 文件中设置 VOLCES_API_KEY 或 OPENAI_API_KEY。"
+            return
+
         # 先给一个即时反馈
         yield "好的，让我想想这个问题...\n\n"
 
         prompt = self._build_response_prompt(user_input, context, "medium")
 
         try:
+            has_content = False
             async for chunk in self.llm.stream_generate(
                 prompt,
                 max_tokens=500,
                 temperature=self.temperature,
             ):
+                has_content = True
                 yield chunk
-        except Exception:
-            yield "抱歉，处理时出现问题。"
+            if not has_content:
+                yield "抱歉，我暂时无法连接到模型服务。"
+        except Exception as e:
+            yield f"抱歉，处理时出现问题：{str(e)}"
 
     async def _complex_response(
         self,

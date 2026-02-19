@@ -41,10 +41,19 @@ class ThinkerAgent:
         api_key: Optional[str] = None,
         base_url: Optional[str] = None,
     ):
+        # 获取API密钥
+        effective_api_key = api_key or settings.VOLCES_API_KEY or settings.OPENAI_API_KEY
+
+        # 检查API密钥是否有效
+        if not effective_api_key or effective_api_key.startswith("your-"):
+            self._api_key_configured = False
+        else:
+            self._api_key_configured = True
+
         self.llm = llm_client or create_llm_client(
             provider="openai",
             model=model or settings.THINKER_MODEL,
-            api_key=api_key or settings.VOLCES_API_KEY or settings.OPENAI_API_KEY,
+            api_key=effective_api_key,
             base_url=base_url or settings.LLM_BASE_URL,
         )
         self.name = "thinker"
