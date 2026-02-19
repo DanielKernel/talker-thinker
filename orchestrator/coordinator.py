@@ -6,6 +6,7 @@ import asyncio
 import re
 import time
 from dataclasses import dataclass, field
+from enum import Enum
 from typing import Any, AsyncIterator, Callable, Dict, List, Optional
 
 from config import settings
@@ -13,6 +14,29 @@ from context.types import AgentRole, HandoffType, Message, ResponseLayer, Task, 
 from agents.talker.agent import TalkerAgent
 from agents.thinker.agent import ThinkerAgent
 from orchestrator.scheduler import TaskScheduler, ComplexityBasedScheduler
+
+
+class ThinkerStage(Enum):
+    """Thinker处理阶段"""
+    IDLE = "idle"
+    ANALYZING = "analyzing"      # 思考/分析
+    PLANNING = "planning"        # 规划
+    EXECUTING = "executing"      # 执行步骤
+    SYNTHESIZING = "synthesizing"  # 整合/生成答案
+    COMPLETED = "completed"
+
+
+@dataclass
+class ProgressState:
+    """进度状态跟踪"""
+    current_stage: ThinkerStage = ThinkerStage.IDLE
+    last_stage_change: float = 0
+    last_broadcast: float = 0
+    last_broadcast_msg: str = ""
+    broadcast_count: int = 0
+    current_step: int = 0
+    total_steps: int = 0
+    step_description: str = ""
 
 
 @dataclass
@@ -72,6 +96,147 @@ class Orchestrator:
             "handoffs": 0,
             "errors": 0,
         }
+
+        # 进度状态
+        self._progress_state = ProgressState()
+
+    def _parse_thinker_stage(self, output: str) -> tuple[ThinkerStage, int, int, str]:
+        """
+        解析Thinker输出，识别当前阶段
+
+        Returns:
+            tuple: (阶段, 当前步骤, 总步骤, 步骤描述)
+        """
+        stage = self._progress_state.current_stage
+        current_step = self._progress_state.current_step
+        total_steps = self._progress_state.total_steps
+        step_desc = ""
+
+        # 检测阶段变化
+        if "[思考]" in output or "正在分析" in output:
+            stage = ThinkerStage.ANALYZING
+        elif "[规划]" in output:
+            stage = ThinkerStage.PLANNING
+            # 尝试解析总步骤数
+            steps_match = re.search(r"共(\d+)个步骤", output)
+            if steps_match:
+                total_steps = int(steps_match.group(1))
+        elif "[步骤" in output:
+            stage = ThinkerStage.EXECUTING
+            # 解析步骤信息
+            step_match = re.search(r"\[步骤(\d+)\]", output)
+            if step_match:
+                current_step = int(step_match.group(1))
+            # 解析步骤描述
+            desc_match = re.search(r"\[步骤\d+\]\s*(.+?)(?:\n|$)", output)
+            if desc_match:
+                step_desc = desc_match.group(1).strip()
+        elif "[思考] 整合" in output or "生成最终答案" in output:
+            stage = ThinkerStage.SYNTHESIZING
+        elif "[答案]" in output:
+            stage = ThinkerStage.COMPLETED
+
+        return stage, current_step, total_steps, step_desc
+
+    def _generate_stage_broadcast(
+        self,
+        stage: ThinkerStage,
+        user_query: str,
+        elapsed_time: float,
+        current_step: int = 0,
+        total_steps: int = 0,
+        step_desc: str = "",
+    ) -> str:
+        """
+        根据阶段生成播报消息
+        """
+        # 从用户问题中提取关键信息
+        query_lower = user_query.lower()
+
+        # 提取主题关键词
+        topic_keywords = {
+            "车": ["车", "汽车", "车型", "品牌", "suv", "轿车"],
+            "旅游": ["旅游", "旅行", "景点", "酒店", "机票"],
+            "美食": ["美食", "餐厅", "菜", "吃"],
+            "购物": ["买", "购物", "价格", "便宜"],
+            "咖啡": ["咖啡", "拿铁", "星巴克"],
+        }
+        topic = "任务"
+        for t, keywords in topic_keywords.items():
+            if any(kw in query_lower for kw in keywords):
+                topic = t
+                break
+
+        # 根据阶段生成播报
+        if stage == ThinkerStage.ANALYZING:
+            templates = [
+                f"正在理解您的{topic}需求...",
+                f"正在分析您的问题...",
+                f"正在梳理{topic}相关要点...",
+            ]
+        elif stage == ThinkerStage.PLANNING:
+            templates = [
+                f"已理解需求，正在制定{topic}分析方案...",
+                f"正在规划{topic}分析步骤...",
+                f"正在设计最优分析路径...",
+            ]
+        elif stage == ThinkerStage.EXECUTING:
+            if step_desc:
+                templates = [
+                    f"正在执行: {step_desc[:30]}...",
+                    f"步骤{current_step}/{total_steps}: {step_desc[:25]}...",
+                ]
+            else:
+                templates = [
+                    f"正在处理第{current_step}个分析步骤..." if current_step > 0 else "正在执行分析...",
+                    f"已完成{current_step}个步骤，继续处理..." if current_step > 0 else "正在收集数据...",
+                ]
+        elif stage == ThinkerStage.SYNTHESIZING:
+            templates = [
+                f"正在整合{topic}分析结果...",
+                f"正在生成最终推荐...",
+                f"即将完成，正在整理答案...",
+            ]
+        else:
+            templates = [
+                f"处理中... (已耗时 {elapsed_time:.0f}s)",
+            ]
+
+        # 选择一个模板（基于时间戳避免总是选第一个）
+        idx = int(elapsed_time / 5) % len(templates)
+        return templates[idx]
+
+    def _should_broadcast(
+        self,
+        new_stage: ThinkerStage,
+        current_step: int,
+        elapsed_time: float,
+    ) -> tuple[bool, str]:
+        """
+        判断是否需要播报
+
+        Returns:
+            tuple: (是否播报, 原因)
+        """
+        state = self._progress_state
+        current_time = time.time()
+        min_interval = 6.0  # 最小播报间隔（秒）
+
+        # 阶段变化，立即播报
+        if new_stage != state.current_stage:
+            return True, "stage_changed"
+
+        # 同阶段内，检查时间间隔
+        if current_time - state.last_broadcast >= min_interval:
+            # 检查是否重复消息
+            if state.broadcast_count < 5:  # 限制总播报次数
+                return True, "interval_elapsed"
+
+        # 步骤变化（执行阶段）
+        if new_stage == ThinkerStage.EXECUTING and current_step != state.current_step:
+            return True, "step_changed"
+
+        return False, "skip"
 
     def set_callbacks(
         self,
@@ -163,17 +328,21 @@ class Orchestrator:
             # 保存助手响应到会话（清理掉元数据标记）
             assistant_response = "".join(assistant_response_chunks)
             # 移除时间戳和Agent标识等元数据，只保留实际回复内容
-            # 移除类似 [Talker | 简单任务] 的标记
-            clean_response = re.sub(r'\[Talker[^\]]*\]\s*', '', assistant_response)
-            # 移除类似 [Thinker | LLM请求: ...] 的标记
-            clean_response = re.sub(r'\[Thinker[^\]]*\]\s*', '', clean_response)
-            # 移除类似 [LLM请求: ...] 的标记
-            clean_response = re.sub(r'\[LLM请求: [^\]]+\]\s*', '', clean_response)
+            # 移除类似 [HH:MM:SS.mmm] Talker: 的标记
+            clean_response = re.sub(r'\n?\[\d{2}:\d{2}:\d{2}\.\d{3}\]\s*(Talker|Thinker):\s*', '', assistant_response)
+            # 移除类似 [Talker] ... 的标记
+            clean_response = re.sub(r'\n?\[Talker\][^\n]*', '', clean_response)
+            clean_response = re.sub(r'\n?\[Thinker\][^\n]*', '', clean_response)
+            # 移除 [Talker -> Thinker | ...] 的标记
+            clean_response = re.sub(r'\n?\[Talker[^\]]*\]\s*', '', clean_response)
+            clean_response = re.sub(r'\n?\[Thinker[^\]]*\]\s*', '', clean_response)
             # 移除性能指标区块（包含📊符号的部分）
             clean_response = re.sub(r'\n-{10,}.*?-{10,}', '', clean_response, flags=re.DOTALL)
             # 移除剩余的指标行
             clean_response = re.sub(r'\n\s*📊[^\n]*', '', clean_response)
             clean_response = re.sub(r'\n\s*(Tokens|TTFT|TPOT|TPS|总生成时延|LLM请求时间)[^\n]*', '', clean_response)
+            # 清理多余空行
+            clean_response = re.sub(r'\n{3,}', '\n\n', clean_response)
             clean_response = clean_response.strip()
 
             if clean_response:
@@ -204,15 +373,6 @@ class Orchestrator:
             ms = int((t % 1) * 1000)
             return f"{ts}.{ms:03d}"
 
-        # 显示Agent身份标识
-        if settings.SHOW_AGENT_IDENTITY:
-            complexity_str = {
-                TaskComplexity.SIMPLE: "简单",
-                TaskComplexity.MEDIUM: "中等",
-                TaskComplexity.COMPLEX: "复杂",
-            }.get(classification.complexity, "未知")
-            yield f"[Talker | {complexity_str}任务]\n"
-
         # 记录LLM请求发送时间
         llm_request_time = time.time()
 
@@ -238,12 +398,14 @@ class Orchestrator:
         # 处理Talker输出
         first_token_time = None
         first_timestamp_shown = False
+        output_buffer = []
 
         while not talker_complete or not talker_queue.empty():
             try:
                 # 尝试获取输出，带超时
                 chunk = await asyncio.wait_for(talker_queue.get(), timeout=0.5)
                 last_output_time = time.time()
+                output_buffer.append(chunk)
 
                 # 检查是否需要转交给Thinker
                 if "[NEEDS_THINKER]" in chunk:
@@ -264,11 +426,11 @@ class Orchestrator:
 
                 # 记录第一个有效内容的时间（排除即时反馈语）
                 if first_token_time is None and chunk.strip():
-                    if "收到" not in chunk and "好的" not in chunk and "让我" not in chunk:
+                    if "收到" not in chunk and "好的" not in chunk and "让我" not in chunk and "查一下" not in chunk:
                         first_token_time = time.time()
-                        # 在内容前显示助手时间戳（与用户格式一致）
+                        # 在内容前显示Talker时间戳（与用户格式一致，新起一行）
                         if settings.SHOW_AGENT_IDENTITY and not first_timestamp_shown:
-                            yield f"[{format_timestamp(first_token_time)}] 助手: "
+                            yield f"\n[{format_timestamp(first_token_time)}] Talker: "
                             first_timestamp_shown = True
 
                 yield chunk
@@ -280,7 +442,7 @@ class Orchestrator:
                 if current_time - last_output_time >= progress_interval:
                     elapsed = current_time - llm_request_time
                     if not progress_shown:
-                        yield f"\n[Talker播报] ⏳ 正在等待模型响应... (已耗时 {elapsed:.0f}s)"
+                        yield f"\n[Talker] ⏳ 正在等待响应... (已耗时 {elapsed:.0f}s)"
                         progress_shown = True
                     last_output_time = current_time
 
@@ -351,10 +513,14 @@ class Orchestrator:
         if llm_request_time is None:
             llm_request_time = thinker_start
 
+        # 重置进度状态
+        self._progress_state = ProgressState()
+        self._progress_state.last_stage_change = thinker_start
+        self._progress_state.last_broadcast = thinker_start
+
         # Talker首先给用户反馈
         if settings.SHOW_AGENT_IDENTITY:
-            yield "[Talker -> Thinker | 复杂任务转交]\n"
-        yield "好的，这个问题需要我深度思考一下...\n\n"
+            yield "\n[Talker] 好的，这个问题需要深度思考，已转交给Thinker处理..."
 
         # 记录Handoff到Thinker
         self._record_handoff(
@@ -364,16 +530,12 @@ class Orchestrator:
             "启动协作模式",
         )
 
-        # 进度播报状态
-        last_progress_time = time.time()
-        progress_interval = 3.0  # 每3秒显示一次智能进度
-        last_progress_message = ""
-
         # 收集Thinker的输出，并跟踪首Token时间
         thinker_output = []
         first_token_time = None
         first_timestamp_shown = False
         thinker_complete = False
+        accumulated_output = ""
 
         async def run_thinker():
             """运行Thinker并收集输出"""
@@ -385,13 +547,47 @@ class Orchestrator:
         # 启动Thinker任务
         thinker_task = asyncio.create_task(run_thinker())
 
-        # 处理Thinker输出并提供进度反馈
+        # 处理Thinker输出并提供智能进度反馈
         output_index = 0
         while not thinker_complete or output_index < len(thinker_output):
             # 检查是否有新的Thinker输出
             if output_index < len(thinker_output):
                 chunk = thinker_output[output_index]
                 output_index += 1
+                accumulated_output += chunk
+
+                # 解析当前阶段
+                new_stage, current_step, total_steps, step_desc = self._parse_thinker_stage(accumulated_output)
+
+                # 检查是否需要播报
+                elapsed = time.time() - thinker_start
+                should_broadcast, reason = self._should_broadcast(new_stage, current_step, elapsed)
+
+                if should_broadcast:
+                    # 生成阶段播报
+                    broadcast_msg = self._generate_stage_broadcast(
+                        stage=new_stage,
+                        user_query=user_input,
+                        elapsed_time=elapsed,
+                        current_step=current_step,
+                        total_steps=total_steps,
+                        step_desc=step_desc,
+                    )
+
+                    # 避免重复消息
+                    if broadcast_msg != self._progress_state.last_broadcast_msg:
+                        yield f"\n[Talker] {broadcast_msg}"
+                        self._progress_state.last_broadcast = time.time()
+                        self._progress_state.last_broadcast_msg = broadcast_msg
+                        self._progress_state.broadcast_count += 1
+
+                # 更新状态
+                if new_stage != self._progress_state.current_stage:
+                    self._progress_state.current_stage = new_stage
+                    self._progress_state.last_stage_change = time.time()
+                self._progress_state.current_step = current_step
+                self._progress_state.total_steps = total_steps
+                self._progress_state.step_description = step_desc
 
                 # 记录第一个有效内容的时间（跳过状态标记）
                 if first_token_time is None and chunk.strip():
@@ -400,44 +596,17 @@ class Orchestrator:
                         "思考" not in chunk and
                         "规划" not in chunk and
                         "步骤" not in chunk and
-                        "答案" not in chunk):
+                        "答案" not in chunk and
+                        "Talker" not in chunk):
                         first_token_time = time.time()
-                        # 在内容前显示助手时间戳（与用户格式一致）
+                        # 在内容前显示Thinker时间戳（与用户格式一致，新起一行）
                         if settings.SHOW_AGENT_IDENTITY and not first_timestamp_shown:
-                            yield f"\n[{format_timestamp(first_token_time)}] 助手: "
+                            yield f"\n[{format_timestamp(first_token_time)}] Thinker: "
                             first_timestamp_shown = True
 
                 yield chunk
-                last_progress_time = time.time()
+
             else:
-                # 没有新输出时，检查是否需要显示进度消息
-                current_time = time.time()
-                if current_time - last_progress_time >= progress_interval:
-                    elapsed = current_time - thinker_start
-                    recent_output = "".join(thinker_output[-20:])  # 最近20个chunk
-
-                    # 使用LLM生成智能进度播报
-                    try:
-                        progress_msg = await asyncio.wait_for(
-                            self.talker.generate_progress_broadcast(
-                                original_query=user_input,
-                                recent_output=recent_output,
-                                elapsed_time=elapsed,
-                                context=context,
-                            ),
-                            timeout=2.0
-                        )
-                        # 避免重复消息
-                        if progress_msg != last_progress_message:
-                            yield f"\n[Talker播报] {progress_msg} (已耗时 {elapsed:.0f}s)"
-                            last_progress_message = progress_msg
-                    except asyncio.TimeoutError:
-                        # 超时使用简洁提示
-                        if elapsed > 30:
-                            yield f"\n[Talker播报] ⏳ 处理中... (已耗时 {elapsed:.0f}s)"
-
-                    last_progress_time = current_time
-
                 # 短暂等待，避免忙等待
                 await asyncio.sleep(0.1)
 
