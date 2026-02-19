@@ -161,14 +161,17 @@ class Orchestrator:
 
         Talker处理简单/中等任务，复杂任务委托给Thinker
         """
-        # 显示Agent身份标识
+        start_time = time.time()
+        timestamp = time.strftime("%H:%M:%S", time.localtime(start_time))
+
+        # 显示Agent身份标识和时间戳
         if settings.SHOW_AGENT_IDENTITY:
             complexity_str = {
                 TaskComplexity.SIMPLE: "简单",
                 TaskComplexity.MEDIUM: "中等",
                 TaskComplexity.COMPLEX: "复杂",
             }.get(classification.complexity, "未知")
-            yield f"[Talker | {complexity_str}任务]\n"
+            yield f"[{timestamp}] [Talker | {complexity_str}任务]\n"
 
         async for chunk in self.talker.process(user_input, context):
             # 检查是否需要转交给Thinker
@@ -183,26 +186,38 @@ class Orchestrator:
 
                 # 切换到协作模式
                 async for thinker_chunk in self._collaboration_handoff(
-                    user_input, context
+                    user_input, context, start_time
                 ):
                     yield thinker_chunk
                 return
 
             yield chunk
 
+        # 显示响应时延
+        elapsed_ms = (time.time() - start_time) * 1000
+        if settings.SHOW_AGENT_IDENTITY:
+            yield f"\n[响应时延: {elapsed_ms:.0f}ms]"
+
     async def _collaboration_handoff(
         self,
         user_input: str,
         context: Dict[str, Any],
+        start_time: float = None,
     ) -> AsyncIterator[str]:
         """
         协作模式Handoff
 
         Talker收集信息，Thinker深度处理，Talker播报
         """
+        if start_time is None:
+            start_time = time.time()
+
+        thinker_start = time.time()
+        timestamp = time.strftime("%H:%M:%S", time.localtime(thinker_start))
+
         # Talker首先给用户反馈
         if settings.SHOW_AGENT_IDENTITY:
-            yield "[Talker -> Thinker | 复杂任务转交]\n"
+            yield f"[{timestamp}] [Talker -> Thinker | 复杂任务转交]\n"
         yield "好的，这个问题需要我深度思考一下...\n\n"
 
         # 记录Handoff到Thinker
@@ -215,7 +230,7 @@ class Orchestrator:
 
         # 显示Thinker身份标识
         if settings.SHOW_AGENT_IDENTITY:
-            yield "[Thinker | 深度思考中]\n"
+            yield f"[Thinker | 深度思考中]\n"
 
         # 收集Thinker的输出
         thinker_output = []
@@ -233,6 +248,12 @@ class Orchestrator:
             "talker",
             "Thinker处理完成",
         )
+
+        # 显示响应时延
+        elapsed_ms = (time.time() - start_time) * 1000
+        thinker_ms = (time.time() - thinker_start) * 1000
+        if settings.SHOW_AGENT_IDENTITY:
+            yield f"\n[总时延: {elapsed_ms:.0f}ms | Thinker时延: {thinker_ms:.0f}ms]"
 
     async def _parallel_handoff(
         self,

@@ -5,6 +5,7 @@ import argparse
 import asyncio
 import json
 import sys
+import time
 from typing import Optional
 
 from config import settings
@@ -111,12 +112,12 @@ class TalkerThinkerApp:
         """运行交互模式"""
         await self.initialize()
 
-        print("=" * 50)
+        print("=" * 60)
         print("Talker-Thinker 双Agent系统")
-        print("=" * 50)
+        print("=" * 60)
         print("输入 'quit' 或 'exit' 退出")
         print("输入 'stats' 查看统计信息")
-        print("=" * 50)
+        print("=" * 60)
         print()
 
         session_id = None
@@ -124,8 +125,9 @@ class TalkerThinkerApp:
 
         while True:
             try:
-                # 读取用户输入
-                user_input = input("\n你: ").strip()
+                # 读取用户输入（带时间戳）
+                timestamp = time.strftime("%H:%M:%S", time.localtime())
+                user_input = input(f"\n[{timestamp}] 你: ").strip()
 
                 if not user_input:
                     continue
@@ -142,7 +144,6 @@ class TalkerThinkerApp:
                     continue
 
                 # 处理用户输入
-                print("\n助手: ", end="")
                 turn += 1
                 if session_id is None:
                     import uuid

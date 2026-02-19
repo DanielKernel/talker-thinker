@@ -44,9 +44,9 @@ def setup_logging(log_dir: str = LOG_DIR) -> None:
     log_format = '%(asctime)s [%(levelname)s] %(name)s - %(message)s'
     formatter = logging.Formatter(log_format)
 
-    # 控制台处理器
+    # 控制台处理器 - 只显示警告及以上级别，避免干扰交互界面
     console_handler = logging.StreamHandler(sys.stdout)
-    console_handler.setLevel(logging.INFO)
+    console_handler.setLevel(logging.WARNING)
     console_handler.setFormatter(formatter)
     root_logger.addHandler(console_handler)
 
