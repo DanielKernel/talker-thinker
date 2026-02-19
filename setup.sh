@@ -9,31 +9,38 @@ echo "=== Talker-Thinker 环境设置 ==="
 PYTHON_VERSION=$(python3 --version 2>&1 | awk '{print $2}')
 echo "检测到 Python 版本: $PYTHON_VERSION"
 
-# 创建虚拟环境
-if [ ! -d ".venv" ]; then
-    echo "正在创建虚拟环境..."
-    python3 -m venv .venv
-    echo "虚拟环境创建成功"
-else
-    echo "虚拟环境已存在"
+# 删除旧的虚拟环境（如果存在）
+if [ -d ".venv" ]; then
+    echo "正在删除旧的虚拟环境..."
+    rm -rf .venv
 fi
+
+# 创建虚拟环境
+echo "正在创建虚拟环境..."
+python3 -m venv .venv
+echo "虚拟环境创建成功"
 
 # 激活虚拟环境
 echo "正在激活虚拟环境..."
 source .venv/bin/activate
 
-# 配置国内镜像源
-echo "正在配置 pip 镜像源..."
-pip config set global.index-url https://pypi.tuna.tsinghua.edu.cn/simple
-pip config set global.trusted-host pypi.tuna.tsinghua.edu.cn
+# 在虚拟环境中配置镜像源
+echo "正在配置 pip 镜像源（清华源）..."
+mkdir -p .venv/pip.conf.d
+cat > .venv/pip.conf << 'EOF'
+[global]
+index-url = https://pypi.tuna.tsinghua.edu.cn/simple
+trusted-host = pypi.tuna.tsinghua.edu.cn
+EOF
+export PIP_CONFIG_FILE=.venv/pip.conf
 
 # 升级 pip
 echo "正在升级 pip..."
-pip install --upgrade pip
+pip install --upgrade pip -i https://pypi.tuna.tsinghua.edu.cn/simple
 
 # 安装依赖
 echo "正在安装依赖..."
-pip install -r requirements.txt
+pip install -r requirements.txt -i https://pypi.tuna.tsinghua.edu.cn/simple
 
 # 复制环境变量模板
 if [ ! -f ".env" ]; then
