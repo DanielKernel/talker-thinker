@@ -2,8 +2,11 @@
 Structured Logger - 结构化日志记录
 """
 import logging
+import os
 import sys
 import time
+from datetime import datetime
+from logging.handlers import RotatingFileHandler
 from typing import Any, Dict, Optional
 
 try:
@@ -13,6 +16,70 @@ except ImportError:
     HAS_STRUCTLOG = False
 
 from config import settings
+
+
+# 日志目录
+LOG_DIR = "logs"
+
+
+def setup_logging(log_dir: str = LOG_DIR) -> None:
+    """
+    配置全局日志系统
+
+    Args:
+        log_dir: 日志目录
+    """
+    # 创建日志目录
+    if not os.path.exists(log_dir):
+        os.makedirs(log_dir)
+
+    # 根日志配置
+    root_logger = logging.getLogger()
+    root_logger.setLevel(getattr(logging, settings.LOG_LEVEL))
+
+    # 清除现有处理器
+    root_logger.handlers.clear()
+
+    # 日志格式
+    log_format = '%(asctime)s [%(levelname)s] %(name)s - %(message)s'
+    formatter = logging.Formatter(log_format)
+
+    # 控制台处理器
+    console_handler = logging.StreamHandler(sys.stdout)
+    console_handler.setLevel(logging.INFO)
+    console_handler.setFormatter(formatter)
+    root_logger.addHandler(console_handler)
+
+    # 文件处理器 - 所有日志
+    log_file = os.path.join(log_dir, "talker-thinker.log")
+    file_handler = RotatingFileHandler(
+        log_file,
+        maxBytes=10 * 1024 * 1024,  # 10MB
+        backupCount=5,
+        encoding='utf-8',
+    )
+    file_handler.setLevel(logging.DEBUG)
+    file_handler.setFormatter(formatter)
+    root_logger.addHandler(file_handler)
+
+    # 文件处理器 - 错误日志
+    error_log_file = os.path.join(log_dir, "error.log")
+    error_handler = RotatingFileHandler(
+        error_log_file,
+        maxBytes=10 * 1024 * 1024,  # 10MB
+        backupCount=5,
+        encoding='utf-8',
+    )
+    error_handler.setLevel(logging.ERROR)
+    error_handler.setFormatter(formatter)
+    root_logger.addHandler(error_handler)
+
+    # 抑制第三方库的日志
+    logging.getLogger("httpx").setLevel(logging.WARNING)
+    logging.getLogger("httpcore").setLevel(logging.WARNING)
+    logging.getLogger("openai").setLevel(logging.WARNING)
+    logging.getLogger("anthropic").setLevel(logging.WARNING)
+    logging.getLogger("asyncio").setLevel(logging.WARNING)
 
 
 class StructuredLogger:
@@ -26,14 +93,6 @@ class StructuredLogger:
         self.name = name
         self._logger = logging.getLogger(name)
         self._logger.setLevel(getattr(logging, settings.LOG_LEVEL))
-
-        # 控制台处理器
-        if not self._logger.handlers:
-            console_handler = logging.StreamHandler(sys.stdout)
-            console_handler.setFormatter(logging.Formatter(
-                '%(asctime)s [%(levelname)s] %(name)s - %(message)s'
-            ))
-            self._logger.addHandler(console_handler)
 
         # 上下文
         self._context: Dict[str, Any] = {}
@@ -70,6 +129,13 @@ class StructuredLogger:
 
     def critical(self, message: str, **kwargs) -> None:
         self._log(logging.CRITICAL, message, **kwargs)
+
+    def exception(self, message: str, **kwargs) -> None:
+        """记录异常（包含堆栈信息）"""
+        extra = {**self._context, **kwargs}
+        extra_str = " | ".join(f"{k}={v}" for k, v in extra.items())
+        full_message = f"{message} | {extra_str}" if extra_str else message
+        self._logger.exception(full_message)
 
     def log_request(
         self,
@@ -130,3 +196,7 @@ class StructuredLogger:
 def get_logger(name: str) -> StructuredLogger:
     """获取日志记录器"""
     return StructuredLogger(name)
+
+
+# 初始化日志系统
+setup_logging()

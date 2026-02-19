@@ -3,8 +3,11 @@ LLM客户端抽象层
 支持多种LLM后端
 """
 import asyncio
+import logging
 from abc import ABC, abstractmethod
 from typing import Any, AsyncIterator, Dict, List, Optional
+
+logger = logging.getLogger(__name__)
 
 
 class LLMClient(ABC):
@@ -43,6 +46,10 @@ class LLMClient(ABC):
         """流式生成响应"""
         pass
 
+    async def close(self) -> None:
+        """关闭客户端，释放资源"""
+        pass
+
 
 class OpenAIClient(LLMClient):
     """OpenAI客户端（兼容OpenAI API格式的服务）"""
@@ -57,15 +64,51 @@ class OpenAIClient(LLMClient):
         self._client = None
         self._api_key = api_key
         self._base_url = base_url
+        self._http_client = None
 
     async def _get_client(self):
         if self._client is None:
+            import httpx
+            import os
             from openai import AsyncOpenAI
+
+            # 临时禁用代理环境变量，避免代理导致的问题
+            proxy_vars = ['http_proxy', 'https_proxy', 'HTTP_PROXY', 'HTTPS_PROXY',
+                          'all_proxy', 'ALL_PROXY', 'no_proxy', 'NO_PROXY']
+            saved_proxy = {k: os.environ.get(k) for k in proxy_vars}
+            for k in proxy_vars:
+                os.environ.pop(k, None)
+
+            try:
+                # 创建独立的 HTTP 客户端（不带代理）
+                self._http_client = httpx.AsyncClient(
+                    timeout=httpx.Timeout(60.0, connect=10.0),
+                    limits=httpx.Limits(max_connections=10, max_keepalive_connections=5),
+                    proxy=None,  # 明确禁用代理
+                )
+            finally:
+                # 恢复代理环境变量
+                for k, v in saved_proxy.items():
+                    if v is not None:
+                        os.environ[k] = v
+
             self._client = AsyncOpenAI(
                 api_key=self._api_key,
                 base_url=self._base_url,
+                http_client=self._http_client,
             )
         return self._client
+
+    async def close(self) -> None:
+        """关闭客户端，释放资源"""
+        if self._http_client is not None:
+            try:
+                await self._http_client.aclose()
+            except Exception as e:
+                logger.debug(f"Error closing HTTP client: {e}")
+            finally:
+                self._http_client = None
+                self._client = None
 
     async def generate(
         self,
@@ -142,12 +185,35 @@ class AnthropicClient(LLMClient):
         self.model = model
         self._client = None
         self._api_key = api_key
+        self._http_client = None
 
     async def _get_client(self):
         if self._client is None:
+            import httpx
             from anthropic import AsyncAnthropic
-            self._client = AsyncAnthropic(api_key=self._api_key)
+
+            # 创建独立的 HTTP 客户端
+            self._http_client = httpx.AsyncClient(
+                timeout=httpx.Timeout(60.0, connect=10.0),
+                limits=httpx.Limits(max_connections=10, max_keepalive_connections=5),
+            )
+
+            self._client = AsyncAnthropic(
+                api_key=self._api_key,
+                http_client=self._http_client,
+            )
         return self._client
+
+    async def close(self) -> None:
+        """关闭客户端，释放资源"""
+        if self._http_client is not None:
+            try:
+                await self._http_client.aclose()
+            except Exception as e:
+                logger.debug(f"Error closing HTTP client: {e}")
+            finally:
+                self._http_client = None
+                self._client = None
 
     async def generate(
         self,
