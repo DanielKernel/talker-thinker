@@ -218,7 +218,14 @@ class Orchestrator:
         if settings.SHOW_AGENT_IDENTITY:
             yield f"[LLM请求: {format_timestamp(llm_request_time)}]\n"
 
+        # 超时检测：如果TTFT超过2秒，提示用户
+        first_chunk_time = None
+        chunk_count = 0
+        should_handoff = False
+
         async for chunk in self.talker.process(user_input, context):
+            chunk_count += 1
+
             # 检查是否需要转交给Thinker
             if "[NEEDS_THINKER]" in chunk:
                 # 记录Handoff
@@ -235,6 +242,14 @@ class Orchestrator:
                 ):
                     yield thinker_chunk
                 return
+
+            # 记录第一个有效内容的时间
+            if first_chunk_time is None and chunk.strip() and "收到" not in chunk and "好的" not in chunk:
+                first_chunk_time = time.time()
+                # 如果TTFT超过2秒，警告并考虑转交
+                ttft = (first_chunk_time - llm_request_time) * 1000
+                if ttft > 2000 and settings.SHOW_AGENT_IDENTITY:
+                    yield f"\n[⚠️ 响应较慢({ttft:.0f}ms)，建议此类任务交由Thinker处理]\n"
 
             yield chunk
 

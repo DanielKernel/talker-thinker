@@ -226,24 +226,27 @@ class TalkerAgent:
         if any(q in text for q in simple_queries) and len(text) < 30:
             return TaskComplexity.SIMPLE
 
-        # 需要详细回答的关键词 -> MEDIUM（不一定是COMPLEX）
-        detail_keywords = [
-            "什么", "哪些", "特点", "特征", "功能", "介绍",
-            "解释", "说明", "怎样", "如何", "为什么",
-        ]
-        if any(k in text for k in detail_keywords):
-            return TaskComplexity.MEDIUM
-
-        # 复杂关键词 -> COMPLEX
+        # 复杂任务关键词 -> COMPLEX（优先判断）
         complex_keywords = [
             "分析", "比较", "评估", "设计", "规划", "优化",
-            "深入", "详细解释", "原理解析",
-            "多步", "步骤", "方案", "策略",
+            "深入", "详细解释", "原理解析", "多步", "步骤", "方案", "策略",
+            "多个", "同时", "不同", "排名", "排列", "排序", "推荐",
+            "最新", "实时", "评分", "打分", "对比", "综合",
+            "详细", "完整", "全面", "汇总", "整理",
         ]
         if any(k in text for k in complex_keywords):
             return TaskComplexity.COMPLEX
 
-        # 中等长度 -> 中等
+        # 需要详细回答的关键词 -> MEDIUM
+        detail_keywords = [
+            "什么", "哪些", "特点", "特征", "功能", "介绍",
+            "解释", "说明", "怎样", "如何", "为什么",
+            "地址", "电话", "联系方式", "信息",
+        ]
+        if any(k in text for k in detail_keywords):
+            return TaskComplexity.MEDIUM
+
+        # 长文本 -> 中等
         if len(text) > 100:
             return TaskComplexity.MEDIUM
 
@@ -298,6 +301,9 @@ class TalkerAgent:
             yield "请先配置API密钥。在 .env 文件中设置 VOLCES_API_KEY 或 OPENAI_API_KEY。"
             return
 
+        # 立即给出反馈（<100ms）
+        yield "收到，让我查一下..."
+
         prompt = self._build_response_prompt(user_input, context, "quick")
 
         try:
@@ -339,8 +345,8 @@ class TalkerAgent:
             yield "请先配置API密钥。在 .env 文件中设置 VOLCES_API_KEY 或 OPENAI_API_KEY。"
             return
 
-        # 先给一个即时反馈
-        yield "好的，让我想想这个问题...\n\n"
+        # 立即给出反馈
+        yield "好的，让我想想这个问题...\n"
 
         prompt = self._build_response_prompt(user_input, context, "medium")
 

@@ -10,7 +10,7 @@ from typing import Any, AsyncIterator, Callable, Dict, List, Optional
 
 from config import settings
 from context.types import QualityScore, StepResult, TaskComplexity, TaskStatus
-from agents.llm_client import LLMClient, create_llm_client
+from agents.llm_client import LLMClient, StreamMetrics, create_llm_client
 
 
 @dataclass
@@ -102,10 +102,19 @@ class ThinkerAgent:
         self._stats["total_tasks"] += 1
         start_time = time.time()
 
+        # 累计指标
+        total_input_tokens = 0
+        total_output_tokens = 0
+        total_ttft = 0
+        llm_calls = 0
+
         try:
             # 1. 任务规划
             yield "[思考] 正在分析任务...\n"
+            plan_start = time.time()
             plan = await self.plan_task(user_input, context)
+            plan_time = (time.time() - plan_start) * 1000
+            yield f"  ✓ 规划完成 ({plan_time:.0f}ms)\n"
             await self._report_progress("任务规划完成", 10)
 
             # 2. 展示规划
@@ -118,37 +127,41 @@ class ThinkerAgent:
                 step_num = i + 1
                 progress = 10 + (step_num / len(plan.steps)) * 70
 
-                yield f"[步骤{step_num}] {step.get('name', '执行中...')}\n"
+                yield f"[步骤{step_num}] {step.get('name', '执行中...')}...\n"
                 await self._report_progress(
                     f"执行步骤{step_num}/{len(plan.steps)}",
                     progress,
                 )
 
                 # 执行步骤
+                step_start = time.time()
                 result = await self.execute_step(
                     step=step,
                     context=context,
                     previous_results=step_results,
                 )
                 step_results.append(result)
+                step_time = (time.time() - step_start) * 1000
 
                 if result.status == "success":
-                    yield f"  ✓ 完成\n"
+                    yield f"  ✓ 完成 ({step_time:.0f}ms)\n"
                 else:
                     yield f"  ✗ 失败: {result.errors[0] if result.errors else '未知错误'}\n"
 
                 self._stats["total_steps"] += 1
 
             # 4. 生成最终答案
-            yield "\n[思考] 整合结果...\n"
+            yield "\n[思考] 整合结果，生成最终答案...\n"
             await self._report_progress("生成最终答案", 85)
 
+            answer_start = time.time()
             final_answer = await self.synthesize_answer(
                 user_input=user_input,
                 plan=plan,
                 step_results=step_results,
                 context=context,
             )
+            answer_time = (time.time() - answer_start) * 1000
 
             # 5. 自我反思（可选）
             if settings.ENABLE_SELF_REFLECTION:
@@ -179,6 +192,18 @@ class ThinkerAgent:
 
             yield "\n[答案]\n"
             yield final_answer
+
+            # 保存指标到context
+            total_time = (time.time() - start_time) * 1000
+            if context is not None:
+                context["_llm_metrics"] = {
+                    "input_tokens": total_input_tokens,
+                    "output_tokens": total_output_tokens,
+                    "ttft_ms": total_ttft,
+                    "tpot_ms": total_time / max(total_output_tokens, 1),
+                    "tps": total_output_tokens / (total_time / 1000) if total_time > 0 else 0,
+                    "total_time_ms": total_time,
+                }
 
         except Exception as e:
             self._stats["failed_tasks"] += 1
