@@ -37,6 +37,8 @@ class ProgressState:
     current_step: int = 0
     total_steps: int = 0
     step_description: str = ""
+    broadcast_history: set = field(default_factory=set)  # 用于去重
+    last_content_hash: str = ""  # 用于内容去重
 
 
 @dataclass
@@ -149,47 +151,87 @@ class Orchestrator:
     ) -> str:
         """
         根据阶段生成播报消息（基于上下文的动态消息）
+        关键改进：根据时间进度生成不同风格的播报，避免重复
         """
-        # 从用户问题中提取关键信息
-        query_lower = user_query.lower()
-
         # 提取主题
         topic = self._extract_topic(user_query)
-
-        # 根据阶段和已播报次数生成不同风格的消息
         broadcast_count = self._progress_state.broadcast_count
 
+        # 根据已耗时选择播报风格
+        if elapsed_time < 8:
+            style = "initial"
+        elif elapsed_time < 15:
+            style = "progress"
+        elif elapsed_time < 25:
+            style = "reassure"
+        else:
+            style = "urgent"
+
         if stage == ThinkerStage.ANALYZING:
-            if broadcast_count == 0:
-                return f"正在理解您关于「{topic}」的需求..."
-            elif broadcast_count < 2:
-                return "正在梳理关键要点..."
+            if style == "initial":
+                msgs = [
+                    f"正在理解您关于「{topic}」的需求...",
+                    "正在分析问题关键点...",
+                    f"梳理「{topic}」相关信息...",
+                ]
+            elif style == "progress":
+                msgs = [
+                    "深度分析中，请稍候...",
+                    "正在提取关键要素...",
+                ]
             else:
-                return f"分析中，马上就好... (已耗时 {elapsed_time:.0f}s)"
+                msgs = [
+                    f"分析进行中 ({elapsed_time:.0f}s)...",
+                    "即将完成分析...",
+                ]
+            return msgs[broadcast_count % len(msgs)]
 
         elif stage == ThinkerStage.PLANNING:
-            if broadcast_count == 0:
-                return f"已理解需求，正在制定{topic}分析方案..."
-            elif broadcast_count < 2:
-                return "正在设计最优分析路径..."
+            if style == "initial":
+                msgs = [
+                    f"已理解需求，正在制定{topic}方案...",
+                    "规划最优解决路径...",
+                ]
+            elif style == "progress":
+                msgs = [
+                    "方案设计中...",
+                    "正在分解任务步骤...",
+                ]
             else:
-                return f"规划中，请稍候... (已耗时 {elapsed_time:.0f}s)"
+                msgs = [
+                    f"规划中 ({elapsed_time:.0f}s)...",
+                    "即将开始执行...",
+                ]
+            return msgs[broadcast_count % len(msgs)]
 
         elif stage == ThinkerStage.EXECUTING:
             if total_steps > 0 and current_step > 0:
                 progress_pct = int((current_step / total_steps) * 100)
                 if step_desc:
-                    return f"执行中 ({progress_pct}%): {step_desc[:20]}..."
-                return f"已完成 {current_step}/{total_steps} 个步骤 ({progress_pct}%)..."
-            return f"正在处理中... (已耗时 {elapsed_time:.0f}s)"
+                    short_desc = step_desc[:15] + "..." if len(step_desc) > 15 else step_desc
+                    return f"第{current_step}/{total_steps}步: {short_desc} ({progress_pct}%)"
+                return f"执行中: {current_step}/{total_steps} 步 ({progress_pct}%)"
+            msgs = [
+                "正在处理核心任务...",
+                "执行关键步骤...",
+                f"处理中 ({elapsed_time:.0f}s)...",
+            ]
+            return msgs[broadcast_count % len(msgs)]
 
         elif stage == ThinkerStage.SYNTHESIZING:
-            if broadcast_count == 0:
-                return "正在整合分析结果..."
-            else:
-                return "即将完成，正在整理答案..."
+            msgs = [
+                "正在整合分析结果...",
+                "生成最终答案中...",
+                "即将完成，请稍候...",
+                "整理输出内容...",
+            ]
+            return msgs[broadcast_count % len(msgs)]
 
-        return f"处理中... (已耗时 {elapsed_time:.0f}s)"
+        elif stage == ThinkerStage.COMPLETED:
+            return "处理完成！"
+
+        # 默认消息
+        return f"处理中 ({elapsed_time:.0f}s)..."
 
     def _extract_topic(self, query: str) -> str:
         """从用户问题中提取主题"""
@@ -219,9 +261,16 @@ class Orchestrator:
         new_stage: ThinkerStage,
         current_step: int,
         elapsed_time: float,
+        force_check: bool = False,
     ) -> tuple[bool, str]:
         """
         判断是否需要播报
+
+        Args:
+            new_stage: 当前阶段
+            current_step: 当前步骤
+            elapsed_time: 已耗时
+            force_check: 是否强制检查（忽略最小间隔）
 
         Returns:
             tuple: (是否播报, 原因)
@@ -229,15 +278,16 @@ class Orchestrator:
         state = self._progress_state
         current_time = time.time()
 
-        # 根据阶段调整播报间隔
-        if new_stage == ThinkerStage.ANALYZING:
-            min_interval = 5.0
-        elif new_stage == ThinkerStage.PLANNING:
-            min_interval = 8.0  # 规划阶段可能较长
-        elif new_stage == ThinkerStage.EXECUTING:
-            min_interval = 5.0
-        else:
-            min_interval = 6.0
+        # 动态计算播报间隔：初始频繁，后期稳定
+        def get_min_interval(elapsed: float, stage: ThinkerStage) -> float:
+            """根据耗时和阶段动态计算最小间隔"""
+            base_interval = 2.5 if elapsed < 10 else (3.0 if elapsed < 20 else 4.0)
+            # 规划阶段可能需要更长时间，稍微延长间隔
+            if stage == ThinkerStage.PLANNING:
+                base_interval = min(base_interval + 0.5, 4.0)
+            return base_interval
+
+        min_interval = get_min_interval(elapsed_time, new_stage)
 
         # 阶段变化，立即播报
         if new_stage != state.current_stage:
@@ -248,12 +298,19 @@ class Orchestrator:
             return True, "step_changed"
 
         # 同阶段内，检查时间间隔
-        if current_time - state.last_broadcast >= min_interval:
+        time_since_last = current_time - state.last_broadcast
+        if time_since_last >= min_interval:
             # 限制总播报次数（防止无限播报）
-            if state.broadcast_count < 8:
+            if state.broadcast_count < 10:
                 return True, "interval_elapsed"
 
         return False, "skip"
+
+    def _hash_broadcast_content(self, stage: ThinkerStage, step: int, elapsed: float) -> str:
+        """生成播报内容的哈希值，用于去重"""
+        # 使用阶段和步骤的整数部分作为哈希基础
+        elapsed_bucket = int(elapsed // 5) * 5  # 每5秒一个桶
+        return f"{stage.value}_{step}_{elapsed_bucket}"
 
     def set_callbacks(
         self,
@@ -383,6 +440,7 @@ class Orchestrator:
         委托模式Handoff
 
         Talker处理简单/中等任务，复杂任务委托给Thinker
+        改进：独立于Talker输出频率进行定时播报
         """
         # 格式化时间戳（精确到毫秒）
         def format_timestamp(t):
@@ -410,15 +468,38 @@ class Orchestrator:
         # 处理Talker输出
         first_token_time = None
         first_timestamp_shown = False
-        last_output_time = time.time()
-        last_broadcast_time = time.time()
-        broadcast_interval = 4.0  # 4秒无输出则播报
+        last_broadcast_time = llm_request_time
+        broadcast_count = 0
+
+        def get_talker_broadcast_interval(elapsed: float) -> float:
+            """动态计算播报间隔"""
+            return 2.5 if elapsed < 10 else (3.0 if elapsed < 20 else 4.0)
 
         while not talker_complete or not talker_queue.empty():
+            current_time = time.time()
+            elapsed = current_time - llm_request_time
+
+            # === 关键改进：每次循环都检查是否需要播报 ===
+            broadcast_interval = get_talker_broadcast_interval(elapsed)
+            if current_time - last_broadcast_time >= broadcast_interval:
+                ts = format_timestamp(current_time)
+
+                # 根据时间动态选择播报内容
+                if elapsed < 10:
+                    msgs = ["正在处理...", "思考中..."]
+                elif elapsed < 20:
+                    msgs = [f"仍在处理中 ({elapsed:.0f}s)...", "请稍候..."]
+                else:
+                    msgs = [f"响应较慢 ({elapsed:.0f}s)...", "即将完成..."]
+
+                msg = msgs[broadcast_count % len(msgs)]
+                yield f"\n[{ts}] Talker: {msg}"
+                last_broadcast_time = current_time
+                broadcast_count += 1
+
+            # 尝试获取输出
             try:
-                # 尝试获取输出，带超时
-                chunk = await asyncio.wait_for(talker_queue.get(), timeout=0.5)
-                last_output_time = time.time()
+                chunk = await asyncio.wait_for(talker_queue.get(), timeout=0.1)
 
                 # 检查是否需要转交给Thinker
                 if "[NEEDS_THINKER]" in chunk:
@@ -448,23 +529,8 @@ class Orchestrator:
                 yield chunk
 
             except asyncio.TimeoutError:
-                # 超时，检查是否需要播报
-                current_time = time.time()
-                if current_time - last_output_time >= broadcast_interval:
-                    elapsed = current_time - llm_request_time
-                    ts = format_timestamp(current_time)
-
-                    # 动态播报内容
-                    if elapsed < 10:
-                        msg = "正在处理..."
-                    elif elapsed < 20:
-                        msg = f"仍在处理中... (已耗时 {elapsed:.0f}s)"
-                    else:
-                        msg = f"响应较慢，请稍候... (已耗时 {elapsed:.0f}s)"
-
-                    yield f"\n[{ts}] Talker: {msg}"
-                    last_output_time = current_time
-                    last_broadcast_time = current_time
+                # 超时，继续循环检查播报
+                continue
 
         # 显示详细指标
         if settings.SHOW_AGENT_IDENTITY:
@@ -523,6 +589,7 @@ class Orchestrator:
         协作模式Handoff
 
         Talker收集信息，Thinker深度处理，Talker播报
+        关键改进：独立于Thinker输出频率进行定时播报
         """
         def format_timestamp(t):
             ts = time.strftime("%H:%M:%S", time.localtime(t))
@@ -556,8 +623,20 @@ class Orchestrator:
         thinker_complete = False
         accumulated_output = ""
         thinker_first_token_shown = False
-        last_broadcast_check = time.time()
-        broadcast_check_interval = 2.0  # 每2秒检查一次是否需要播报
+
+        # 播报控制 - 使用独立的时间检查（动态间隔）
+        last_broadcast_time = thinker_start
+
+        def get_broadcast_interval(elapsed: float) -> float:
+            """根据已耗时动态计算播报间隔"""
+            # 初始阶段更频繁（2-3秒），后期稳定在3-4秒
+            if elapsed < 10:
+                return 2.5  # 初始2.5秒
+            elif elapsed < 20:
+                return 3.0  # 中期3秒
+            else:
+                return 4.0  # 后期4秒（上限）
+        output_index = 0
 
         async def run_thinker():
             """运行Thinker并收集输出"""
@@ -569,40 +648,60 @@ class Orchestrator:
         # 启动Thinker任务
         thinker_task = asyncio.create_task(run_thinker())
 
-        # 处理Thinker输出
-        output_index = 0
+        # 主循环：处理Thinker输出和播报
         while not thinker_complete or output_index < len(thinker_output):
             current_time = time.time()
             elapsed = current_time - thinker_start
 
-            # 检查是否有新的Thinker输出
+            # === 关键改进：每次循环都检查是否需要播报 ===
+            # 使用动态间隔：初始频繁，后期稳定
+            broadcast_interval = get_broadcast_interval(elapsed)
+            if current_time - last_broadcast_time >= broadcast_interval:
+                # 解析当前阶段（基于已有输出）
+                new_stage, current_step, total_steps, step_desc = self._parse_thinker_stage(accumulated_output)
+
+                # 检查是否需要播报
+                should_broadcast, reason = self._should_broadcast(new_stage, current_step, elapsed)
+
+                if should_broadcast:
+                    # 使用内容哈希去重
+                    content_hash = self._hash_broadcast_content(new_stage, current_step, elapsed)
+                    if content_hash not in self._progress_state.broadcast_history:
+                        broadcast_msg = self._generate_stage_broadcast(
+                            stage=new_stage,
+                            user_query=user_input,
+                            elapsed_time=elapsed,
+                            current_step=current_step,
+                            total_steps=total_steps,
+                            step_desc=step_desc,
+                        )
+
+                        # 额外检查：确保消息不重复
+                        if broadcast_msg != self._progress_state.last_broadcast_msg:
+                            ts = format_timestamp(current_time)
+                            yield f"\n[{ts}] Talker: {broadcast_msg}"
+                            self._progress_state.last_broadcast = current_time
+                            self._progress_state.last_broadcast_msg = broadcast_msg
+                            self._progress_state.broadcast_count += 1
+                            self._progress_state.broadcast_history.add(content_hash)
+
+                        # 更新状态
+                        if new_stage != self._progress_state.current_stage:
+                            self._progress_state.current_stage = new_stage
+                            self._progress_state.last_stage_change = current_time
+                        self._progress_state.current_step = current_step
+                        self._progress_state.total_steps = total_steps
+
+                last_broadcast_time = current_time
+
+            # === 处理Thinker输出 ===
             if output_index < len(thinker_output):
                 chunk = thinker_output[output_index]
                 output_index += 1
                 accumulated_output += chunk
 
-                # 解析当前阶段
+                # 解析阶段（用于状态更新）
                 new_stage, current_step, total_steps, step_desc = self._parse_thinker_stage(accumulated_output)
-
-                # 检查是否需要播报（阶段变化或步骤变化）
-                should_broadcast, reason = self._should_broadcast(new_stage, current_step, elapsed)
-
-                if should_broadcast:
-                    broadcast_msg = self._generate_stage_broadcast(
-                        stage=new_stage,
-                        user_query=user_input,
-                        elapsed_time=elapsed,
-                        current_step=current_step,
-                        total_steps=total_steps,
-                        step_desc=step_desc,
-                    )
-
-                    if broadcast_msg != self._progress_state.last_broadcast_msg:
-                        ts = format_timestamp(current_time)
-                        yield f"\n[{ts}] Talker: {broadcast_msg}"
-                        self._progress_state.last_broadcast = current_time
-                        self._progress_state.last_broadcast_msg = broadcast_msg
-                        self._progress_state.broadcast_count += 1
 
                 # 更新状态
                 if new_stage != self._progress_state.current_stage:
@@ -618,39 +717,9 @@ class Orchestrator:
                         yield f"\n[{ts}] Thinker: "
                         thinker_first_token_shown = True
                     yield chunk
-
-                last_broadcast_check = current_time
-
             else:
-                # 没有新输出时，检查是否需要播报（长时间无响应）
-                if current_time - last_broadcast_check >= broadcast_check_interval:
-                    elapsed = current_time - thinker_start
-                    should_broadcast, reason = self._should_broadcast(
-                        self._progress_state.current_stage,
-                        self._progress_state.current_step,
-                        elapsed
-                    )
-
-                    if should_broadcast:
-                        broadcast_msg = self._generate_stage_broadcast(
-                            stage=self._progress_state.current_stage,
-                            user_query=user_input,
-                            elapsed_time=elapsed,
-                            current_step=self._progress_state.current_step,
-                            total_steps=self._progress_state.total_steps,
-                            step_desc=self._progress_state.step_description,
-                        )
-
-                        if broadcast_msg != self._progress_state.last_broadcast_msg:
-                            ts = format_timestamp(current_time)
-                            yield f"\n[{ts}] Talker: {broadcast_msg}"
-                            self._progress_state.last_broadcast = current_time
-                            self._progress_state.last_broadcast_msg = broadcast_msg
-                            self._progress_state.broadcast_count += 1
-
-                    last_broadcast_check = current_time
-
-                await asyncio.sleep(0.1)
+                # 没有新输出时短暂等待
+                await asyncio.sleep(0.05)
 
         # 确保所有输出都已处理
         while output_index < len(thinker_output):

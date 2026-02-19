@@ -453,19 +453,32 @@ class TalkerAgent:
         mode: str = "quick",
     ) -> str:
         """构建响应Prompt"""
+        # 检测是否是记忆相关问题
+        memory_keywords = ["记得", "说过", "问过", "刚才", "之前", "上次", "历史"]
+        is_memory_query = any(kw in user_input for kw in memory_keywords)
+
         # 构建对话历史（所有模式都使用）
         context_str = ""
         if context and "messages" in context:
-            # 获取最近的对话历史（排除当前消息）
-            recent = context["messages"][-5:] if len(context["messages"]) > 1 else []
+            # 记忆相关问题使用更多历史
+            history_limit = 15 if is_memory_query else 5
+            recent = context["messages"][-history_limit:] if len(context["messages"]) > 1 else []
             if recent:
                 context_str = "\n对话历史：\n" + "\n".join([
-                    f"[{'用户' if m.get('role') == 'user' else '助手'}]: {m.get('content', '')}"
+                    f"[{'用户' if m.get('role') == 'user' else '助手'}]: {m.get('content', '')[:200]}"
                     for m in recent
                 ]) + "\n"
 
         if mode == "quick":
-            return f"""你是一个友好、高效的对话助手。请简洁地回复用户。
+            # 根据问题类型调整系统提示
+            if is_memory_query:
+                system_hint = """你是一个友好、高效的对话助手。
+用户正在询问之前的对话内容。请仔细查看对话历史，准确回忆用户之前提到的内容。
+如果找到了相关内容，直接告诉用户；如果没找到，诚实地说明。"""
+            else:
+                system_hint = "你是一个友好、高效的对话助手。请简洁地回复用户。"
+
+            return f"""{system_hint}
 {context_str}
 当前用户消息：{user_input}
 
@@ -478,7 +491,13 @@ class TalkerAgent:
 回复："""
 
         elif mode == "medium":
-            return f"""你是一个友好的对话助手。
+            if is_memory_query:
+                system_hint = """你是一个友好的对话助手。
+用户正在询问之前的对话内容。请仔细查看对话历史，准确回忆并总结用户之前提到的内容。"""
+            else:
+                system_hint = "你是一个友好的对话助手。"
+
+            return f"""{system_hint}
 {context_str}
 当前用户问题：{user_input}
 
