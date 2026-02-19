@@ -3,6 +3,7 @@ Orchestrator - 协调器
 管理Talker和Thinker的协同工作
 """
 import asyncio
+import re
 import time
 from dataclasses import dataclass, field
 from typing import Any, AsyncIterator, Callable, Dict, List, Optional
@@ -88,6 +89,7 @@ class Orchestrator:
         user_input: str,
         session_id: Optional[str] = None,
         context: Optional[Dict[str, Any]] = None,
+        received_time: Optional[float] = None,
     ) -> AsyncIterator[str]:
         """
         处理用户输入
@@ -96,12 +98,15 @@ class Orchestrator:
             user_input: 用户输入
             session_id: 会话ID
             context: 额外上下文
+            received_time: 消息接收时间
 
         Yields:
             str: 响应内容
         """
         self._stats["total_requests"] += 1
         start_time = time.time()
+        if received_time is None:
+            received_time = start_time
 
         # 初始化会话
         if session_id is None:
@@ -120,7 +125,11 @@ class Orchestrator:
             **(context or {}),
             "session_id": session_id,
             "messages": session["messages"],
+            "received_time": received_time,
         }
+
+        # 收集助手响应用于保存到会话
+        assistant_response_chunks = []
 
         try:
             # 使用Talker进行意图分类
@@ -131,22 +140,47 @@ class Orchestrator:
                 # 复杂任务：使用协作模式
                 self._stats["thinker_handled"] += 1
                 async for chunk in self._collaboration_handoff(
-                    user_input, full_context
+                    user_input, full_context, received_time=received_time
                 ):
+                    assistant_response_chunks.append(chunk)
                     yield chunk
             else:
                 # 简单/中等任务：Talker处理
                 self._stats["talker_handled"] += 1
                 async for chunk in self._delegation_handoff(
-                    user_input, full_context, classification
+                    user_input, full_context, classification, received_time=received_time
                 ):
+                    assistant_response_chunks.append(chunk)
                     yield chunk
 
         except Exception as e:
             self._stats["errors"] += 1
-            yield f"抱歉，处理时出现错误：{str(e)}"
+            error_msg = f"抱歉，处理时出现错误：{str(e)}"
+            assistant_response_chunks.append(error_msg)
+            yield error_msg
 
         finally:
+            # 保存助手响应到会话（清理掉元数据标记）
+            assistant_response = "".join(assistant_response_chunks)
+            # 移除时间戳和Agent标识等元数据，只保留实际回复内容
+            import re
+            # 移除类似 [接收: 00:09:01.123] [Talker | 简单任务] 的标记
+            clean_response = re.sub(r'\[接收: [^\]]+\]\s*\[[^\]]+\]\s*', '', assistant_response)
+            # 移除类似 [响应时延: XXXms] 的标记
+            clean_response = re.sub(r'\n?\[[^\]]*时延[^\]]*\]$', '', clean_response)
+            # 移除类似 [Talker -> Thinker | ...] 的标记
+            clean_response = re.sub(r'\[[^\]]*Talker[^\]]*\]\s*', '', clean_response)
+            # 移除类似 [Thinker开始: ...] 的标记
+            clean_response = re.sub(r'\[[^\]]*Thinker[^\]]*\]\s*', '', clean_response)
+            clean_response = clean_response.strip()
+
+            if clean_response:
+                session["messages"].append({
+                    "role": "assistant",
+                    "content": clean_response,
+                    "timestamp": time.time(),
+                })
+
             elapsed = (time.time() - start_time) * 1000
             session["last_latency_ms"] = elapsed
 
@@ -155,6 +189,7 @@ class Orchestrator:
         user_input: str,
         context: Dict[str, Any],
         classification,
+        received_time: float = None,
     ) -> AsyncIterator[str]:
         """
         委托模式Handoff
@@ -162,17 +197,25 @@ class Orchestrator:
         Talker处理简单/中等任务，复杂任务委托给Thinker
         """
         start_time = time.time()
-        timestamp = time.strftime("%H:%M:%S", time.localtime(start_time))
+        if received_time is None:
+            received_time = start_time
 
-        # 显示Agent身份标识和时间戳
+        # 格式化时间戳（精确到毫秒）
+        def format_timestamp(t):
+            ts = time.strftime("%H:%M:%S", time.localtime(t))
+            ms = int((t % 1) * 1000)
+            return f"{ts}.{ms:03d}"
+
+        # 显示Agent身份标识和接收时间
         if settings.SHOW_AGENT_IDENTITY:
             complexity_str = {
                 TaskComplexity.SIMPLE: "简单",
                 TaskComplexity.MEDIUM: "中等",
                 TaskComplexity.COMPLEX: "复杂",
             }.get(classification.complexity, "未知")
-            yield f"[{timestamp}] [Talker | {complexity_str}任务]\n"
+            yield f"[接收: {format_timestamp(received_time)}] [Talker | {complexity_str}任务]\n"
 
+        first_token_time = None
         async for chunk in self.talker.process(user_input, context):
             # 检查是否需要转交给Thinker
             if "[NEEDS_THINKER]" in chunk:
@@ -186,23 +229,32 @@ class Orchestrator:
 
                 # 切换到协作模式
                 async for thinker_chunk in self._collaboration_handoff(
-                    user_input, context, start_time
+                    user_input, context, start_time, received_time=received_time
                 ):
                     yield thinker_chunk
                 return
 
+            if first_token_time is None and chunk.strip():
+                first_token_time = time.time()
             yield chunk
 
-        # 显示响应时延
-        elapsed_ms = (time.time() - start_time) * 1000
+        # 显示响应时延和首token时间
+        end_time = time.time()
+        elapsed_ms = (end_time - start_time) * 1000
         if settings.SHOW_AGENT_IDENTITY:
-            yield f"\n[响应时延: {elapsed_ms:.0f}ms]"
+            timing_info = [f"响应时延: {elapsed_ms:.0f}ms"]
+            if first_token_time:
+                first_token_ms = (first_token_time - start_time) * 1000
+                timing_info.append(f"首Token: {first_token_ms:.0f}ms")
+                timing_info.append(f"首Token时间: {format_timestamp(first_token_time)}")
+            yield f"\n[{' | '.join(timing_info)}]"
 
     async def _collaboration_handoff(
         self,
         user_input: str,
         context: Dict[str, Any],
         start_time: float = None,
+        received_time: float = None,
     ) -> AsyncIterator[str]:
         """
         协作模式Handoff
@@ -211,13 +263,20 @@ class Orchestrator:
         """
         if start_time is None:
             start_time = time.time()
+        if received_time is None:
+            received_time = start_time
 
         thinker_start = time.time()
-        timestamp = time.strftime("%H:%M:%S", time.localtime(thinker_start))
+
+        # 格式化时间戳（精确到毫秒）
+        def format_timestamp(t):
+            ts = time.strftime("%H:%M:%S", time.localtime(t))
+            ms = int((t % 1) * 1000)
+            return f"{ts}.{ms:03d}"
 
         # Talker首先给用户反馈
         if settings.SHOW_AGENT_IDENTITY:
-            yield f"[{timestamp}] [Talker -> Thinker | 复杂任务转交]\n"
+            yield f"[接收: {format_timestamp(received_time)}] [Talker -> Thinker | 复杂任务转交]\n"
         yield "好的，这个问题需要我深度思考一下...\n\n"
 
         # 记录Handoff到Thinker
@@ -230,11 +289,14 @@ class Orchestrator:
 
         # 显示Thinker身份标识
         if settings.SHOW_AGENT_IDENTITY:
-            yield f"[Thinker | 深度思考中]\n"
+            yield f"[Thinker开始: {format_timestamp(thinker_start)}]\n"
 
         # 收集Thinker的输出
         thinker_output = []
+        first_token_time = None
         async for chunk in self.thinker.process(user_input, context):
+            if first_token_time is None and chunk.strip():
+                first_token_time = time.time()
             thinker_output.append(chunk)
             yield chunk
 
@@ -250,10 +312,15 @@ class Orchestrator:
         )
 
         # 显示响应时延
-        elapsed_ms = (time.time() - start_time) * 1000
-        thinker_ms = (time.time() - thinker_start) * 1000
+        end_time = time.time()
+        elapsed_ms = (end_time - start_time) * 1000
+        thinker_ms = (end_time - thinker_start) * 1000
         if settings.SHOW_AGENT_IDENTITY:
-            yield f"\n[总时延: {elapsed_ms:.0f}ms | Thinker时延: {thinker_ms:.0f}ms]"
+            timing_parts = [f"总时延: {elapsed_ms:.0f}ms", f"Thinker时延: {thinker_ms:.0f}ms"]
+            if first_token_time:
+                first_token_ms = (first_token_time - thinker_start) * 1000
+                timing_parts.append(f"首Token: {first_token_ms:.0f}ms")
+            yield f"\n[{' | '.join(timing_parts)}]"
 
     async def _parallel_handoff(
         self,

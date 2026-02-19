@@ -321,32 +321,33 @@ class TalkerAgent:
         mode: str = "quick",
     ) -> str:
         """构建响应Prompt"""
+        # 构建对话历史（所有模式都使用）
+        context_str = ""
+        if context and "messages" in context:
+            # 获取最近的对话历史（排除当前消息）
+            recent = context["messages"][-5:] if len(context["messages"]) > 1 else []
+            if recent:
+                context_str = "\n对话历史：\n" + "\n".join([
+                    f"[{'用户' if m.get('role') == 'user' else '助手'}]: {m.get('content', '')}"
+                    for m in recent
+                ]) + "\n"
+
         if mode == "quick":
             return f"""你是一个友好、高效的对话助手。请简洁地回复用户。
-
-用户：{user_input}
+{context_str}
+当前用户消息：{user_input}
 
 要求：
 1. 回复简洁（不超过100字）
 2. 语气友好
-3. 直接回答问题
+3. 结合对话历史理解用户意图
+4. 直接回答问题
 
 回复："""
 
         elif mode == "medium":
-            context_str = ""
-            if context and "messages" in context:
-                recent = context["messages"][-3:]
-                context_str = "\n".join([
-                    f"[{m.get('role', 'user')}]: {m.get('content', '')}"
-                    for m in recent
-                ])
-
             return f"""你是一个友好的对话助手。
-
-对话历史：
 {context_str}
-
 当前用户问题：{user_input}
 
 请提供一个有帮助的回答（200字以内）："""

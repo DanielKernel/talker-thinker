@@ -72,13 +72,14 @@ class TalkerThinkerApp:
             {"agent": progress.get("agent", "unknown")},
         )
 
-    async def process(self, user_input: str, session_id: Optional[str] = None) -> str:
+    async def process(self, user_input: str, session_id: Optional[str] = None, received_time: Optional[float] = None) -> str:
         """
         处理用户输入
 
         Args:
             user_input: 用户输入
             session_id: 会话ID（可选）
+            received_time: 消息接收时间（可选）
 
         Returns:
             str: 系统响应
@@ -90,7 +91,10 @@ class TalkerThinkerApp:
 
         # 收集流式响应
         result_chunks = []
-        async for chunk in self.orchestrator.process(user_input, session_id):
+        first_token_time = None
+        async for chunk in self.orchestrator.process(user_input, session_id, received_time=received_time):
+            if first_token_time is None and chunk.strip():
+                first_token_time = time.time()
             result_chunks.append(chunk)
             # 实时输出（用于CLI模式）
             print(chunk, end="", flush=True)
@@ -125,9 +129,11 @@ class TalkerThinkerApp:
 
         while True:
             try:
-                # 读取用户输入（带时间戳）
-                timestamp = time.strftime("%H:%M:%S", time.localtime())
-                user_input = input(f"\n[{timestamp}] 你: ").strip()
+                # 读取用户输入（带时间戳，精确到毫秒）
+                now = time.time()
+                timestamp = time.strftime("%H:%M:%S", time.localtime(now))
+                ms = int((now % 1) * 1000)
+                user_input = input(f"\n[{timestamp}.{ms:03d}] 你: ").strip()
 
                 if not user_input:
                     continue
@@ -149,7 +155,8 @@ class TalkerThinkerApp:
                     import uuid
                     session_id = str(uuid.uuid4())
 
-                await self.process(user_input, session_id)
+                # 传递接收时间给process
+                await self.process(user_input, session_id, received_time=now)
                 print()  # 换行
 
             except KeyboardInterrupt:
