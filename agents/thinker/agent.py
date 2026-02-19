@@ -38,10 +38,14 @@ class ThinkerAgent:
         self,
         llm_client: Optional[LLMClient] = None,
         model: Optional[str] = None,
+        api_key: Optional[str] = None,
+        base_url: Optional[str] = None,
     ):
         self.llm = llm_client or create_llm_client(
             provider="openai",
             model=model or settings.THINKER_MODEL,
+            api_key=api_key or settings.VOLCES_API_KEY or settings.OPENAI_API_KEY,
+            base_url=base_url or settings.LLM_BASE_URL,
         )
         self.name = "thinker"
         self.timeout_ms = settings.THINKER_TIMEOUT_MS

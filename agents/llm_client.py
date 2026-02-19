@@ -45,17 +45,26 @@ class LLMClient(ABC):
 
 
 class OpenAIClient(LLMClient):
-    """OpenAI客户端"""
+    """OpenAI客户端（兼容OpenAI API格式的服务）"""
 
-    def __init__(self, model: str = "gpt-4o-mini", api_key: Optional[str] = None):
+    def __init__(
+        self,
+        model: str = "DeepSeek-V3.2",
+        api_key: Optional[str] = None,
+        base_url: Optional[str] = None,
+    ):
         self.model = model
         self._client = None
         self._api_key = api_key
+        self._base_url = base_url
 
     async def _get_client(self):
         if self._client is None:
             from openai import AsyncOpenAI
-            self._client = AsyncOpenAI(api_key=self._api_key)
+            self._client = AsyncOpenAI(
+                api_key=self._api_key,
+                base_url=self._base_url,
+            )
         return self._client
 
     async def generate(
@@ -242,10 +251,15 @@ def create_llm_client(
     provider: str = "openai",
     model: Optional[str] = None,
     api_key: Optional[str] = None,
+    base_url: Optional[str] = None,
 ) -> LLMClient:
     """创建LLM客户端"""
     if provider == "openai":
-        return OpenAIClient(model=model or "gpt-4o-mini", api_key=api_key)
+        return OpenAIClient(
+            model=model or "DeepSeek-V3.2",
+            api_key=api_key,
+            base_url=base_url,
+        )
     elif provider == "anthropic":
         return AnthropicClient(model=model or "claude-3-haiku-20240307", api_key=api_key)
     elif provider == "mock":

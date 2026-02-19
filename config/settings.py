@@ -15,9 +15,12 @@ class Settings(BaseSettings):
     APP_VERSION: str = "1.0.0"
     DEBUG: bool = False
 
+    # LLM Base URL配置
+    LLM_BASE_URL: str = "https://ark.cn-beijing.volces.com/api/coding/v3"
+
     # Agent模型配置
-    TALKER_MODEL: str = "gpt-4o-mini"
-    THINKER_MODEL: str = "gpt-4o"
+    TALKER_MODEL: str = "DeepSeek-V3.2"
+    THINKER_MODEL: str = "Kimi-K2-thinking"
     TALKER_TEMPERATURE: float = 0.7
     THINKER_TEMPERATURE: float = 0.3
 
@@ -63,6 +66,9 @@ class Settings(BaseSettings):
     # API Keys
     OPENAI_API_KEY: Optional[str] = None
     ANTHROPIC_API_KEY: Optional[str] = None
+
+    # Volces/Ark API Key (用于火山引擎模型)
+    VOLCES_API_KEY: Optional[str] = None
 
     # 向量数据库配置
     VECTOR_DB_URL: Optional[str] = None

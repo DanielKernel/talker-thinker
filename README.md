@@ -60,6 +60,11 @@ cp .env.example .env
 # 编辑 .env 文件，填入你的API密钥
 ```
 
+默认使用火山引擎模型：
+- **Talker模型**: DeepSeek-V3.2（快速响应）
+- **Thinker模型**: Kimi-K2-thinking（深度推理）
+- **Base URL**: https://ark.cn-beijing.volces.com/api/coding/v3
+
 ### 运行
 
 ```bash
