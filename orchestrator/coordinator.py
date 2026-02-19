@@ -215,8 +215,6 @@ class Orchestrator:
 
         # 记录LLM请求发送时间
         llm_request_time = time.time()
-        if settings.SHOW_AGENT_IDENTITY:
-            yield f"[LLM请求发送: {format_timestamp(llm_request_time)}]\n"
 
         # 进度消息
         progress_shown = False
@@ -239,7 +237,7 @@ class Orchestrator:
 
         # 处理Talker输出
         first_token_time = None
-        first_real_content_shown = False
+        first_timestamp_shown = False
 
         while not talker_complete or not talker_queue.empty():
             try:
@@ -266,14 +264,12 @@ class Orchestrator:
 
                 # 记录第一个有效内容的时间（排除即时反馈语）
                 if first_token_time is None and chunk.strip():
-                    if "收到" not in chunk and "好的" not in chunk and "让我" not in chunk and "\n" not in chunk:
+                    if "收到" not in chunk and "好的" not in chunk and "让我" not in chunk:
                         first_token_time = time.time()
-                        if settings.SHOW_AGENT_IDENTITY and not first_real_content_shown:
-                            yield f"\n[助手首Token: {format_timestamp(first_token_time)}]\n"
-                            first_real_content_shown = True
-                        ttft = (first_token_time - llm_request_time) * 1000
-                        if ttft > 2000 and settings.SHOW_AGENT_IDENTITY:
-                            yield f"[⚠️ 响应较慢({ttft:.0f}ms)，建议此类任务交由Thinker处理]\n"
+                        # 在内容前显示助手时间戳（与用户格式一致）
+                        if settings.SHOW_AGENT_IDENTITY and not first_timestamp_shown:
+                            yield f"[{format_timestamp(first_token_time)}] 助手: "
+                            first_timestamp_shown = True
 
                 yield chunk
                 progress_shown = False
@@ -368,10 +364,6 @@ class Orchestrator:
             "启动协作模式",
         )
 
-        # 显示Thinker身份标识和LLM请求发送时间
-        if settings.SHOW_AGENT_IDENTITY:
-            yield f"[Thinker | LLM请求发送: {format_timestamp(thinker_start)}]\n"
-
         # 进度播报状态
         last_progress_time = time.time()
         progress_interval = 3.0  # 每3秒显示一次智能进度
@@ -380,7 +372,7 @@ class Orchestrator:
         # 收集Thinker的输出，并跟踪首Token时间
         thinker_output = []
         first_token_time = None
-        first_real_content_shown = False
+        first_timestamp_shown = False
         thinker_complete = False
 
         async def run_thinker():
@@ -401,13 +393,19 @@ class Orchestrator:
                 chunk = thinker_output[output_index]
                 output_index += 1
 
-                # 记录第一个有效内容的时间
+                # 记录第一个有效内容的时间（跳过状态标记）
                 if first_token_time is None and chunk.strip():
-                    if not chunk.strip().startswith("[") and "思考" not in chunk and "规划" not in chunk and "步骤" not in chunk:
+                    # 跳过Thinker的状态标记和播报
+                    if (not chunk.strip().startswith("[") and
+                        "思考" not in chunk and
+                        "规划" not in chunk and
+                        "步骤" not in chunk and
+                        "答案" not in chunk):
                         first_token_time = time.time()
-                        if settings.SHOW_AGENT_IDENTITY and not first_real_content_shown:
-                            yield f"\n[助手首Token: {format_timestamp(first_token_time)}]\n"
-                            first_real_content_shown = True
+                        # 在内容前显示助手时间戳（与用户格式一致）
+                        if settings.SHOW_AGENT_IDENTITY and not first_timestamp_shown:
+                            yield f"\n[{format_timestamp(first_token_time)}] 助手: "
+                            first_timestamp_shown = True
 
                 yield chunk
                 last_progress_time = time.time()
