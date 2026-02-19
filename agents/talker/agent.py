@@ -9,7 +9,7 @@ from typing import Any, AsyncIterator, Callable, Dict, List, Optional
 
 from config import settings
 from context.types import Message, ResponseLayer, TaskComplexity
-from agents.llm_client import LLMClient, create_llm_client
+from agents.llm_client import LLMClient, StreamMetrics, create_llm_client
 
 
 @dataclass
@@ -19,6 +19,13 @@ class IntentClassification:
     complexity: TaskComplexity
     confidence: float
     reasoning: str = ""
+
+
+@dataclass
+class ResponseWithMetrics:
+    """带指标的响应"""
+    content: str = ""
+    metrics: Optional[StreamMetrics] = None
 
 
 class TalkerAgent:
@@ -117,6 +124,39 @@ class TalkerAgent:
         except Exception as e:
             self._stats["errors"] += 1
             yield f"抱歉，处理时出现问题：{str(e)}"
+
+    async def process_with_metrics(
+        self,
+        user_input: str,
+        context: Optional[Dict[str, Any]] = None,
+    ) -> tuple[AsyncIterator[str], "StreamMetrics"]:
+        """
+        处理用户输入（带详细指标）
+
+        Args:
+            user_input: 用户输入
+            context: 上下文信息
+
+        Returns:
+            tuple: (内容迭代器, 指标对象)
+        """
+        metrics = StreamMetrics()
+        content_chunks = []
+
+        async def generator():
+            async for chunk in self.process(user_input, context):
+                content_chunks.append(chunk)
+                yield chunk
+            # 从context获取指标（如果有）
+            if context and "_llm_metrics" in context:
+                metrics.input_tokens = context["_llm_metrics"].get("input_tokens", 0)
+                metrics.output_tokens = context["_llm_metrics"].get("output_tokens", 0)
+                metrics.ttft_ms = context["_llm_metrics"].get("ttft_ms", 0)
+                metrics.tpot_ms = context["_llm_metrics"].get("tpot_ms", 0)
+                metrics.tps = context["_llm_metrics"].get("tps", 0)
+                metrics.total_time_ms = context["_llm_metrics"].get("total_time_ms", 0)
+
+        return generator(), metrics
 
     async def classify_intent(
         self,
@@ -262,13 +302,27 @@ class TalkerAgent:
 
         try:
             has_content = False
-            async for chunk in self.llm.stream_generate(
+            # 使用带指标的流式生成
+            stream, metrics = await self.llm.stream_generate_with_metrics(
                 prompt,
                 max_tokens=200,
                 temperature=self.temperature,
-            ):
+            )
+            async for chunk in stream:
                 has_content = True
                 yield chunk
+
+            # 保存指标到context
+            if context is not None:
+                context["_llm_metrics"] = {
+                    "input_tokens": metrics.input_tokens,
+                    "output_tokens": metrics.output_tokens,
+                    "ttft_ms": metrics.ttft_ms,
+                    "tpot_ms": metrics.tpot_ms,
+                    "tps": metrics.tps,
+                    "total_time_ms": metrics.total_time_ms,
+                }
+
             if not has_content:
                 yield "抱歉，我暂时无法连接到模型服务。"
         except Exception as e:
@@ -292,13 +346,27 @@ class TalkerAgent:
 
         try:
             has_content = False
-            async for chunk in self.llm.stream_generate(
+            # 使用带指标的流式生成
+            stream, metrics = await self.llm.stream_generate_with_metrics(
                 prompt,
                 max_tokens=500,
                 temperature=self.temperature,
-            ):
+            )
+            async for chunk in stream:
                 has_content = True
                 yield chunk
+
+            # 保存指标到context
+            if context is not None:
+                context["_llm_metrics"] = {
+                    "input_tokens": metrics.input_tokens,
+                    "output_tokens": metrics.output_tokens,
+                    "ttft_ms": metrics.ttft_ms,
+                    "tpot_ms": metrics.tpot_ms,
+                    "tps": metrics.tps,
+                    "total_time_ms": metrics.total_time_ms,
+                }
+
             if not has_content:
                 yield "抱歉，我暂时无法连接到模型服务。"
         except Exception as e:

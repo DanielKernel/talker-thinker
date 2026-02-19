@@ -4,10 +4,23 @@ LLM客户端抽象层
 """
 import asyncio
 import logging
+import time
 from abc import ABC, abstractmethod
+from dataclasses import dataclass
 from typing import Any, AsyncIterator, Dict, List, Optional
 
 logger = logging.getLogger(__name__)
+
+
+@dataclass
+class StreamMetrics:
+    """流式响应指标"""
+    input_tokens: int = 0
+    output_tokens: int = 0
+    ttft_ms: float = 0  # Time To First Token (ms)
+    tpot_ms: float = 0  # Time Per Output Token (ms)
+    tps: float = 0  # Tokens Per Second
+    total_time_ms: float = 0  # 总响应时间
 
 
 class LLMClient(ABC):
@@ -45,6 +58,47 @@ class LLMClient(ABC):
     ) -> AsyncIterator[str]:
         """流式生成响应"""
         pass
+
+    async def stream_generate_with_metrics(
+        self,
+        prompt: str,
+        max_tokens: int = 1000,
+        temperature: float = 0.7,
+        **kwargs,
+    ) -> tuple[AsyncIterator[str], "StreamMetrics"]:
+        """
+        流式生成响应（带指标）
+
+        Returns:
+            tuple: (内容迭代器, 指标对象)
+        """
+        metrics = StreamMetrics()
+        start_time = time.time()
+        first_token_time = None
+        token_count = 0
+
+        async def generator():
+            nonlocal first_token_time, token_count
+            async for chunk in self.stream_generate(prompt, max_tokens, temperature, **kwargs):
+                if first_token_time is None:
+                    first_token_time = time.time()
+                token_count += 1
+                yield chunk
+
+            # 计算指标
+            end_time = time.time()
+            metrics.total_time_ms = (end_time - start_time) * 1000
+            if first_token_time:
+                metrics.ttft_ms = (first_token_time - start_time) * 1000
+            if token_count > 0 and first_token_time:
+                generation_time = (end_time - first_token_time) * 1000
+                metrics.tpot_ms = generation_time / token_count
+                metrics.tps = token_count / (generation_time / 1000) if generation_time > 0 else 0
+            metrics.output_tokens = token_count
+            # 估算输入token数（粗略估计：中文约1.5字符/token，英文约4字符/token）
+            metrics.input_tokens = len(prompt) // 3
+
+        return generator(), metrics
 
     async def close(self) -> None:
         """关闭客户端，释放资源"""
@@ -168,6 +222,7 @@ class OpenAIClient(LLMClient):
             max_tokens=max_tokens,
             temperature=temperature,
             stream=True,
+            stream_options={"include_usage": True},  # 请求token使用信息
             **kwargs,
         )
         async for chunk in stream:
@@ -176,6 +231,67 @@ class OpenAIClient(LLMClient):
                 delta = chunk.choices[0].delta
                 if delta and delta.content:
                     yield delta.content
+
+    async def stream_generate_with_metrics(
+        self,
+        prompt: str,
+        max_tokens: int = 1000,
+        temperature: float = 0.7,
+        **kwargs,
+    ) -> tuple[AsyncIterator[str], StreamMetrics]:
+        """
+        流式生成响应（带详细指标）
+        """
+        client = await self._get_client()
+        metrics = StreamMetrics()
+        start_time = time.time()
+        first_token_time = None
+        token_count = 0
+
+        async def generator():
+            nonlocal first_token_time, token_count
+            stream = await client.chat.completions.create(
+                model=self.model,
+                messages=[{"role": "user", "content": prompt}],
+                max_tokens=max_tokens,
+                temperature=temperature,
+                stream=True,
+                stream_options={"include_usage": True},
+                **kwargs,
+            )
+
+            async for chunk in stream:
+                # 检查是否有usage信息（在最后一个chunk中）
+                if hasattr(chunk, 'usage') and chunk.usage:
+                    metrics.input_tokens = chunk.usage.prompt_tokens or 0
+                    metrics.output_tokens = chunk.usage.completion_tokens or 0
+
+                # 检查content
+                if chunk.choices and len(chunk.choices) > 0:
+                    delta = chunk.choices[0].delta
+                    if delta and delta.content:
+                        if first_token_time is None:
+                            first_token_time = time.time()
+                        token_count += 1
+                        yield delta.content
+
+            # 计算指标
+            end_time = time.time()
+            metrics.total_time_ms = (end_time - start_time) * 1000
+            if first_token_time:
+                metrics.ttft_ms = (first_token_time - start_time) * 1000
+                generation_time = (end_time - first_token_time) * 1000
+                if token_count > 0:
+                    metrics.tpot_ms = generation_time / token_count
+                    metrics.tps = token_count / (generation_time / 1000) if generation_time > 0 else 0
+            # 如果API没返回output_tokens，使用计数
+            if metrics.output_tokens == 0:
+                metrics.output_tokens = token_count
+            # 如果API没返回input_tokens，估算
+            if metrics.input_tokens == 0:
+                metrics.input_tokens = len(prompt) // 3
+
+        return generator(), metrics
 
 
 class AnthropicClient(LLMClient):

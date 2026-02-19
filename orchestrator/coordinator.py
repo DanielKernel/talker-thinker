@@ -163,15 +163,17 @@ class Orchestrator:
             # 保存助手响应到会话（清理掉元数据标记）
             assistant_response = "".join(assistant_response_chunks)
             # 移除时间戳和Agent标识等元数据，只保留实际回复内容
-            import re
-            # 移除类似 [接收: 00:09:01.123] [Talker | 简单任务] 的标记
-            clean_response = re.sub(r'\[接收: [^\]]+\]\s*\[[^\]]+\]\s*', '', assistant_response)
-            # 移除类似 [响应时延: XXXms] 的标记
-            clean_response = re.sub(r'\n?\[[^\]]*时延[^\]]*\]$', '', clean_response)
-            # 移除类似 [Talker -> Thinker | ...] 的标记
-            clean_response = re.sub(r'\[[^\]]*Talker[^\]]*\]\s*', '', clean_response)
-            # 移除类似 [Thinker开始: ...] 的标记
-            clean_response = re.sub(r'\[[^\]]*Thinker[^\]]*\]\s*', '', clean_response)
+            # 移除类似 [Talker | 简单任务] 的标记
+            clean_response = re.sub(r'\[Talker[^\]]*\]\s*', '', assistant_response)
+            # 移除类似 [Thinker | LLM请求: ...] 的标记
+            clean_response = re.sub(r'\[Thinker[^\]]*\]\s*', '', clean_response)
+            # 移除类似 [LLM请求: ...] 的标记
+            clean_response = re.sub(r'\[LLM请求: [^\]]+\]\s*', '', clean_response)
+            # 移除性能指标区块（包含📊符号的部分）
+            clean_response = re.sub(r'\n-{10,}.*?-{10,}', '', clean_response, flags=re.DOTALL)
+            # 移除剩余的指标行
+            clean_response = re.sub(r'\n\s*📊[^\n]*', '', clean_response)
+            clean_response = re.sub(r'\n\s*(Tokens|TTFT|TPOT|TPS|总生成时延|LLM请求时间)[^\n]*', '', clean_response)
             clean_response = clean_response.strip()
 
             if clean_response:
@@ -196,26 +198,26 @@ class Orchestrator:
 
         Talker处理简单/中等任务，复杂任务委托给Thinker
         """
-        start_time = time.time()
-        if received_time is None:
-            received_time = start_time
-
         # 格式化时间戳（精确到毫秒）
         def format_timestamp(t):
             ts = time.strftime("%H:%M:%S", time.localtime(t))
             ms = int((t % 1) * 1000)
             return f"{ts}.{ms:03d}"
 
-        # 显示Agent身份标识和接收时间
+        # 显示Agent身份标识
         if settings.SHOW_AGENT_IDENTITY:
             complexity_str = {
                 TaskComplexity.SIMPLE: "简单",
                 TaskComplexity.MEDIUM: "中等",
                 TaskComplexity.COMPLEX: "复杂",
             }.get(classification.complexity, "未知")
-            yield f"[接收: {format_timestamp(received_time)}] [Talker | {complexity_str}任务]\n"
+            yield f"[Talker | {complexity_str}任务]\n"
 
-        first_token_time = None
+        # 记录LLM请求发送时间
+        llm_request_time = time.time()
+        if settings.SHOW_AGENT_IDENTITY:
+            yield f"[LLM请求: {format_timestamp(llm_request_time)}]\n"
+
         async for chunk in self.talker.process(user_input, context):
             # 检查是否需要转交给Thinker
             if "[NEEDS_THINKER]" in chunk:
@@ -229,31 +231,61 @@ class Orchestrator:
 
                 # 切换到协作模式
                 async for thinker_chunk in self._collaboration_handoff(
-                    user_input, context, start_time, received_time=received_time
+                    user_input, context, llm_request_time, received_time=received_time
                 ):
                     yield thinker_chunk
                 return
 
-            if first_token_time is None and chunk.strip():
-                first_token_time = time.time()
             yield chunk
 
-        # 显示响应时延和首token时间
-        end_time = time.time()
-        elapsed_ms = (end_time - start_time) * 1000
+        # 显示详细指标
         if settings.SHOW_AGENT_IDENTITY:
-            timing_info = [f"响应时延: {elapsed_ms:.0f}ms"]
-            if first_token_time:
-                first_token_ms = (first_token_time - start_time) * 1000
-                timing_info.append(f"首Token: {first_token_ms:.0f}ms")
-                timing_info.append(f"首Token时间: {format_timestamp(first_token_time)}")
-            yield f"\n[{' | '.join(timing_info)}]"
+            metrics = context.get("_llm_metrics", {}) if context else {}
+            yield "\n" + self._format_metrics(metrics, llm_request_time)
+
+    def _format_metrics(self, metrics: dict, llm_request_time: float) -> str:
+        """格式化指标输出"""
+        def format_timestamp(t):
+            ts = time.strftime("%H:%M:%S", time.localtime(t))
+            ms = int((t % 1) * 1000)
+            return f"{ts}.{ms:03d}"
+
+        lines = ["-" * 50]
+        lines.append("📊 模型性能指标")
+
+        # Token统计
+        input_tokens = metrics.get("input_tokens", 0)
+        output_tokens = metrics.get("output_tokens", 0)
+        if input_tokens or output_tokens:
+            lines.append(f"  Tokens: 输入={input_tokens} | 输出={output_tokens}")
+
+        # 时延指标
+        ttft = metrics.get("ttft_ms", 0)
+        tpot = metrics.get("tpot_ms", 0)
+        total_time = metrics.get("total_time_ms", 0)
+
+        if ttft:
+            lines.append(f"  TTFT(首Token响应时延): {ttft:.0f}ms")
+        if total_time:
+            lines.append(f"  响应时延(生成总耗时): {total_time:.0f}ms")
+        if tpot:
+            lines.append(f"  TPOT(平均每Token时延): {tpot:.1f}ms")
+
+        # TPS吞吐
+        tps = metrics.get("tps", 0)
+        if tps:
+            lines.append(f"  TPS(模型吞吐): {tps:.1f} tokens/s")
+
+        lines.append(f"  LLM请求发送时间: {format_timestamp(llm_request_time)}")
+        lines.append("-" * 50)
+
+        return "\n".join(lines)
 
     async def _collaboration_handoff(
         self,
         user_input: str,
         context: Dict[str, Any],
-        start_time: float = None,
+        llm_request_time: float = None,
         received_time: float = None,
     ) -> AsyncIterator[str]:
         """
@@ -261,22 +293,18 @@ class Orchestrator:
 
         Talker收集信息，Thinker深度处理，Talker播报
         """
-        if start_time is None:
-            start_time = time.time()
-        if received_time is None:
-            received_time = start_time
-
-        thinker_start = time.time()
-
-        # 格式化时间戳（精确到毫秒）
         def format_timestamp(t):
             ts = time.strftime("%H:%M:%S", time.localtime(t))
             ms = int((t % 1) * 1000)
             return f"{ts}.{ms:03d}"
 
+        thinker_start = time.time()
+        if llm_request_time is None:
+            llm_request_time = thinker_start
+
         # Talker首先给用户反馈
         if settings.SHOW_AGENT_IDENTITY:
-            yield f"[接收: {format_timestamp(received_time)}] [Talker -> Thinker | 复杂任务转交]\n"
+            yield "[Talker -> Thinker | 复杂任务转交]\n"
         yield "好的，这个问题需要我深度思考一下...\n\n"
 
         # 记录Handoff到Thinker
@@ -287,16 +315,13 @@ class Orchestrator:
             "启动协作模式",
         )
 
-        # 显示Thinker身份标识
+        # 显示Thinker身份标识和LLM请求时间
         if settings.SHOW_AGENT_IDENTITY:
-            yield f"[Thinker开始: {format_timestamp(thinker_start)}]\n"
+            yield f"[Thinker | LLM请求: {format_timestamp(thinker_start)}]\n"
 
         # 收集Thinker的输出
         thinker_output = []
-        first_token_time = None
         async for chunk in self.thinker.process(user_input, context):
-            if first_token_time is None and chunk.strip():
-                first_token_time = time.time()
             thinker_output.append(chunk)
             yield chunk
 
@@ -311,16 +336,10 @@ class Orchestrator:
             "Thinker处理完成",
         )
 
-        # 显示响应时延
-        end_time = time.time()
-        elapsed_ms = (end_time - start_time) * 1000
-        thinker_ms = (end_time - thinker_start) * 1000
+        # 显示详细指标
         if settings.SHOW_AGENT_IDENTITY:
-            timing_parts = [f"总时延: {elapsed_ms:.0f}ms", f"Thinker时延: {thinker_ms:.0f}ms"]
-            if first_token_time:
-                first_token_ms = (first_token_time - thinker_start) * 1000
-                timing_parts.append(f"首Token: {first_token_ms:.0f}ms")
-            yield f"\n[{' | '.join(timing_parts)}]"
+            metrics = context.get("_llm_metrics", {}) if context else {}
+            yield "\n" + self._format_metrics(metrics, thinker_start)
 
     async def _parallel_handoff(
         self,
