@@ -26,13 +26,21 @@ echo "虚拟环境创建成功"
 echo "正在激活虚拟环境..."
 source .venv/bin/activate
 
-# 升级 pip（使用镜像源）
-echo "正在升级 pip..."
-pip install --upgrade pip -i "$MIRROR" --trusted-host pypi.tuna.tsinghua.edu.cn
+# 禁用代理
+unset http_proxy
+unset https_proxy
+unset HTTP_PROXY
+unset HTTPS_PROXY
+unset all_proxy
+unset ALL_PROXY
 
-# 安装依赖（使用镜像源）
+# 升级 pip（使用镜像源，禁用代理）
+echo "正在升级 pip..."
+pip install --upgrade pip -i "$MIRROR" --trusted-host pypi.tuna.tsinghua.edu.cn --proxy ""
+
+# 安装依赖（使用镜像源，禁用代理）
 echo "正在安装依赖（使用清华镜像源）..."
-pip install -r requirements.txt -i "$MIRROR" --trusted-host pypi.tuna.tsinghua.edu.cn
+pip install -r requirements.txt -i "$MIRROR" --trusted-host pypi.tuna.tsinghua.edu.cn --proxy ""
 
 # 复制环境变量模板
 if [ ! -f ".env" ]; then
