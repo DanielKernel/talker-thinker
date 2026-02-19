@@ -11,9 +11,21 @@ from typing import Any, AsyncIterator, Callable, Dict, List, Optional
 
 from config import settings
 from context.types import AgentRole, HandoffType, Message, ResponseLayer, Task, TaskComplexity
+from context.session_context import SessionContext
+from context.shared_context import SharedContext, ClarificationStatus
+from context.summarizer import ConversationSummarizer
 from agents.talker.agent import TalkerAgent
 from agents.thinker.agent import ThinkerAgent
 from orchestrator.scheduler import TaskScheduler, ComplexityBasedScheduler
+from skills.engine import SkillsEngine
+from skills.invoker import SkillInvoker
+from skills.examples import (
+    WeatherSkill,
+    SearchSkill,
+    KnowledgeSearchSkill,
+    CalculatorSkill,
+    UnitConverterSkill,
+)
 
 
 class ThinkerStage(Enum):
@@ -68,6 +80,9 @@ class Orchestrator:
         talker: Optional[TalkerAgent] = None,
         thinker: Optional[ThinkerAgent] = None,
         task_scheduler: Optional[TaskScheduler] = None,
+        session_context: Optional[SessionContext] = None,
+        skills_engine: Optional[SkillsEngine] = None,
+        summarizer: Optional[ConversationSummarizer] = None,
     ):
         # Agent实例
         self.talker = talker or TalkerAgent()
@@ -77,8 +92,26 @@ class Orchestrator:
         self.task_scheduler = task_scheduler or TaskScheduler()
         self.complexity_scheduler = ComplexityBasedScheduler()
 
-        # 会话状态
-        self._sessions: Dict[str, Dict[str, Any]] = {}
+        # 会话上下文（支持Redis持久化，不可用时降级到内存）
+        self.session_context = session_context or SessionContext()
+
+        # 共享上下文（Talker和Thinker之间共享）
+        self._shared_contexts: Dict[str, SharedContext] = {}
+
+        # Skills引擎和调用器
+        self.skills_engine = skills_engine or SkillsEngine()
+        self.skill_invoker = SkillInvoker(self.skills_engine)
+        self._initialize_default_skills()
+
+        # 将SkillInvoker注入到Thinker
+        self.thinker.set_skill_invoker(self.skill_invoker)
+
+        # 对话摘要器（用于长对话压缩）
+        self.summarizer = summarizer or ConversationSummarizer(
+            summary_threshold=settings.SUMMARY_THRESHOLD
+        )
+
+        # Handoff历史
         self._handoff_history: List[HandoffContext] = []
 
         # 回调函数
@@ -101,6 +134,18 @@ class Orchestrator:
 
         # 进度状态
         self._progress_state = ProgressState()
+
+    def _initialize_default_skills(self) -> None:
+        """初始化默认技能"""
+        default_skills = [
+            WeatherSkill(),
+            SearchSkill(),
+            KnowledgeSearchSkill(),
+            CalculatorSkill(),
+            UnitConverterSkill(),
+        ]
+        for skill in default_skills:
+            self.skills_engine.register_skill(skill)
 
     def _parse_thinker_stage(self, output: str) -> tuple[ThinkerStage, int, int, str]:
         """
@@ -352,19 +397,58 @@ class Orchestrator:
             import uuid
             session_id = str(uuid.uuid4())
 
-        session = self._get_or_create_session(session_id)
-        session["messages"].append({
-            "role": "user",
-            "content": user_input,
-            "timestamp": time.time(),
-        })
+        # 使用SessionContext获取会话（支持持久化）
+        session = await self._get_or_create_session(session_id)
 
-        # 构建上下文
+        # 添加用户消息到SessionContext
+        user_message = Message(
+            role="user",
+            content=user_input,
+            timestamp=time.time(),
+        )
+        await self.session_context.add_message(session_id, user_message)
+
+        # 创建/获取共享上下文
+        shared = self._get_or_create_shared_context(session_id, user_input)
+        shared.is_processing = True
+
+        # === 检查是否是回答澄清问题 ===
+        if shared.needs_clarification():
+            # 用户可能是在回答澄清问题
+            pending = shared.get_pending_clarification()
+            if pending:
+                # 记录回答
+                shared.answer_clarification(user_input)
+                # 更新意图
+                shared.update_intent_with_clarification(user_input)
+
+                # 给用户确认反馈
+                ts = time.strftime("%H:%M:%S", time.localtime())
+                ms = int((time.time() % 1) * 1000)
+                yield f"\n[{ts}.{ms:03d}] Talker: 收到，已更新您的需求信息"
+
+                # 标记为继续处理，但使用更新后的意图
+                # 如果澄清后的意图足够简单，可以让Talker处理
+                # 否则继续交给Thinker
+
+        # 构建完整上下文（包含共享上下文和摘要）
+        # 获取会话摘要（如果有的话）
+        session_summary = await self.session_context.get_summary(session_id)
+
+        # 如果没有摘要且消息较多，生成摘要
+        messages = await self.session_context.get_messages(session_id, limit=50)
+        if not session_summary and len(messages) >= settings.SUMMARY_THRESHOLD:
+            session_summary = await self.summarizer.summarize_recent_messages(messages)
+            if session_summary:
+                await self.session_context.set_summary(session_id, session_summary)
+
         full_context = {
             **(context or {}),
             "session_id": session_id,
             "messages": session["messages"],
             "received_time": received_time,
+            "shared": shared,  # 添加共享上下文
+            "session_summary": session_summary,  # 添加会话摘要
         }
 
         # 收集助手响应用于保存到会话
@@ -420,14 +504,19 @@ class Orchestrator:
             clean_response = clean_response.strip()
 
             if clean_response:
-                session["messages"].append({
-                    "role": "assistant",
-                    "content": clean_response,
-                    "timestamp": time.time(),
-                })
+                # 使用SessionContext保存助手响应
+                assistant_message = Message(
+                    role="assistant",
+                    content=clean_response,
+                    timestamp=time.time(),
+                )
+                await self.session_context.add_message(session_id, assistant_message)
+
+            # 更新共享上下文状态
+            shared.is_processing = False
 
             elapsed = (time.time() - start_time) * 1000
-            session["last_latency_ms"] = elapsed
+            await self.session_context.set_session_data(session_id, "last_latency_ms", elapsed)
 
     async def _delegation_handoff(
         self,
@@ -605,10 +694,43 @@ class Orchestrator:
         self._progress_state.last_stage_change = thinker_start
         self._progress_state.last_broadcast = thinker_start - 3  # 允许立即播报
 
+        # 获取共享上下文
+        shared = context.get("shared")
+
         # Talker首先给用户反馈
         if settings.SHOW_AGENT_IDENTITY:
             timestamp = format_timestamp(thinker_start)
             yield f"\n[{timestamp}] Talker: 好的，这个问题需要深度思考，已转交给Thinker处理"
+
+        # === 澄清机制：检测是否需要澄清 ===
+        try:
+            # 快速规划以检测是否需要澄清
+            quick_plan = await self.thinker.plan_task(user_input, context)
+            needs_clarification, reason, missing_info = await self.thinker.needs_clarification(
+                user_input, quick_plan, context
+            )
+
+            if needs_clarification and missing_info and shared:
+                # 生成澄清问题
+                question = await self.thinker.generate_clarification_question(
+                    user_input, missing_info, context
+                )
+
+                # 通过Talker向用户提问
+                ts = format_timestamp(time.time())
+                yield f"\n[{ts}] Talker: {question}"
+
+                # 记录澄清请求
+                shared.add_clarification_request(question, reason or "", [])
+
+                # 等待用户回答（通过队列机制）
+                # 注意：这里使用简化的方式，实际回答会在下一次process中处理
+                # 将澄清状态保存到共享上下文供下次使用
+                shared.clarification_status = ClarificationStatus.PENDING
+
+        except Exception:
+            # 澄清检测失败，继续正常处理
+            pass
 
         # 记录Handoff到Thinker
         self._record_handoff(
@@ -799,15 +921,27 @@ class Orchestrator:
             result.append(chunk)
         return result
 
-    def _get_or_create_session(self, session_id: str) -> Dict[str, Any]:
-        """获取或创建会话"""
-        if session_id not in self._sessions:
-            self._sessions[session_id] = {
-                "messages": [],
-                "created_at": time.time(),
-                "state": "active",
-            }
-        return self._sessions[session_id]
+    async def _get_or_create_session(self, session_id: str) -> Dict[str, Any]:
+        """获取或创建会话（使用SessionContext持久化）"""
+        if not await self.session_context.exists(session_id):
+            await self.session_context.set_session_data(session_id, "created_at", time.time())
+            await self.session_context.set_session_data(session_id, "state", "active")
+
+        # 返回兼容格式
+        messages = await self.session_context.get_messages(session_id, limit=100)
+        return {
+            "messages": [m.to_dict() for m in messages],
+            "created_at": await self.session_context.get_session_data(session_id, "created_at", time.time()),
+            "state": await self.session_context.get_session_data(session_id, "state", "active"),
+        }
+
+    def _get_or_create_shared_context(self, session_id: str, user_input: str = "") -> SharedContext:
+        """获取或创建共享上下文"""
+        if session_id not in self._shared_contexts:
+            self._shared_contexts[session_id] = SharedContext(user_input=user_input)
+        elif user_input:
+            self._shared_contexts[session_id].user_input = user_input
+        return self._shared_contexts[session_id]
 
     def _record_handoff(
         self,
@@ -835,15 +969,17 @@ class Orchestrator:
         if self._on_progress:
             await self._on_progress(progress_info)
 
-    def get_session(self, session_id: str) -> Optional[Dict[str, Any]]:
+    async def get_session(self, session_id: str) -> Optional[Dict[str, Any]]:
         """获取会话信息"""
-        return self._sessions.get(session_id)
+        if await self.session_context.exists(session_id):
+            return await self._get_or_create_session(session_id)
+        return None
 
     def get_stats(self) -> Dict[str, Any]:
         """获取统计信息"""
         return {
             **self._stats,
-            "active_sessions": len(self._sessions),
+            "active_sessions": len(self._shared_contexts),
             "recent_handoffs": len(self._handoff_history[-10:]),
             "talker_stats": self.talker.get_stats(),
             "thinker_stats": self.thinker.get_stats(),
@@ -862,10 +998,11 @@ class Orchestrator:
             for h in self._handoff_history[-limit:]
         ]
 
-    def clear_session(self, session_id: str) -> None:
+    async def clear_session(self, session_id: str) -> None:
         """清除会话"""
-        if session_id in self._sessions:
-            del self._sessions[session_id]
+        await self.session_context.delete_session(session_id)
+        if session_id in self._shared_contexts:
+            del self._shared_contexts[session_id]
 
     def reset_stats(self) -> None:
         """重置统计"""

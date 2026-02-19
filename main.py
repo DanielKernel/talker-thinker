@@ -23,6 +23,8 @@ class UserIntent(Enum):
     REPLACE = "replace"        # 取消当前任务，开始新任务
     MODIFY = "modify"          # 修改当前任务
     QUERY_STATUS = "status"    # 查询状态
+    PAUSE = "pause"            # 暂停当前任务
+    RESUME = "resume"          # 恢复当前任务
 
 
 class TaskManager:
@@ -33,10 +35,17 @@ class TaskManager:
         self._current_input: Optional[str] = None
         self._is_processing = False
         self._cancelled = False
+        self._paused = False
+        self._pause_event: Optional[asyncio.Event] = None
+        self._task_context: Optional[dict] = None  # 保存暂停时的上下文
 
     @property
     def is_processing(self) -> bool:
         return self._is_processing
+
+    @property
+    def is_paused(self) -> bool:
+        return self._paused
 
     @property
     def current_input(self) -> Optional[str]:
@@ -48,17 +57,48 @@ class TaskManager:
         self._current_input = user_input
         self._is_processing = True
         self._cancelled = False
+        self._paused = False
+        self._pause_event = asyncio.Event()
+        self._pause_event.set()  # 初始状态：不暂停
 
     def end_task(self):
         """结束当前任务"""
         self._current_task = None
         self._current_input = None
         self._is_processing = False
+        self._paused = False
+        self._task_context = None
+
+    async def pause_current_task(self) -> bool:
+        """暂停当前任务"""
+        if self._current_task and not self._current_task.done() and not self._paused:
+            self._paused = True
+            if self._pause_event:
+                self._pause_event.clear()  # 设置暂停标志
+            return True
+        return False
+
+    async def resume_current_task(self) -> bool:
+        """恢复当前任务"""
+        if self._paused:
+            self._paused = False
+            if self._pause_event:
+                self._pause_event.set()  # 清除暂停标志
+            return True
+        return False
+
+    async def wait_if_paused(self):
+        """如果任务被暂停，等待恢复"""
+        if self._paused and self._pause_event:
+            await self._pause_event.wait()
 
     async def cancel_current_task(self) -> bool:
         """取消当前任务"""
         if self._current_task and not self._current_task.done():
             self._cancelled = True
+            # 如果暂停了，先恢复才能取消
+            if self._paused:
+                await self.resume_current_task()
             self._current_task.cancel()
             try:
                 await self._current_task
@@ -72,7 +112,7 @@ class TaskManager:
         """
         分类用户意图：继续、替换、修改当前任务
 
-        基于自然语言理解用户意图
+        基于关键词的快速分类（同步方法，用于快速判断）
         """
         if not self._current_input or not self._is_processing:
             return UserIntent.REPLACE
@@ -104,6 +144,28 @@ class TaskManager:
         if any(kw in text for kw in modify_keywords):
             return UserIntent.MODIFY
 
+        # 暂停关键词
+        pause_keywords = [
+            "暂停", "等一下", "稍等", "等会", "先停", "pause",
+        ]
+        if any(kw in text for kw in pause_keywords):
+            return UserIntent.PAUSE
+
+        # 恢复关键词
+        resume_keywords = [
+            "继续", "恢复", "接着", "resume", "continue",
+        ]
+        if any(kw in text for kw in resume_keywords):
+            return UserIntent.RESUME
+
+        # 回答澄清问题的关键词
+        clarify_keywords = [
+            "是", "对", "好", "可以", "要", "大概", "左右",
+            "万", "块", "元", "预算",
+        ]
+        if any(kw in text for kw in clarify_keywords) and len(text) < 30:
+            return UserIntent.CONTINUE  # 可能是回答澄清问题
+
         # 检查是否是全新的话题
         # 如果新问题和当前任务差异很大，认为是替换
         current_topic = self._extract_topic(self._current_input)
@@ -118,6 +180,63 @@ class TaskManager:
         # 默认：如果当前有任务在运行，新输入视为替换
         # 因为用户不太会在等待时提供补充信息
         return UserIntent.REPLACE
+
+    async def classify_intent_with_llm(
+        self,
+        new_input: str,
+        llm_client,
+        timeout: float = 1.0
+    ) -> UserIntent:
+        """
+        使用LLM进行更智能的意图分类
+
+        Args:
+            new_input: 用户新输入
+            llm_client: LLM客户端
+            timeout: 超时时间（秒）
+
+        Returns:
+            UserIntent: 分类结果
+        """
+        if not self._current_input or not self._is_processing:
+            return UserIntent.REPLACE
+
+        prompt = f"""系统正在处理用户的任务：{self._current_input[:100]}
+
+用户现在说：{new_input}
+
+请判断用户的意图是哪一种：
+1. REPLACE - 取消当前任务，开始新任务
+2. MODIFY - 修改或补充当前任务的信息
+3. QUERY_STATUS - 查询当前任务的进度
+4. CONTINUE - 继续当前任务（可能是回答系统的澄清问题）
+
+只返回意图类型（REPLACE/MODIFY/QUERY_STATUS/CONTINUE），不要解释。"""
+
+        try:
+            import asyncio
+            response = await asyncio.wait_for(
+                llm_client.generate(prompt, max_tokens=20, temperature=0.3),
+                timeout=timeout
+            )
+            response = response.strip().upper()
+
+            if "REPLACE" in response:
+                return UserIntent.REPLACE
+            elif "MODIFY" in response:
+                return UserIntent.MODIFY
+            elif "QUERY_STATUS" in response or "STATUS" in response:
+                return UserIntent.QUERY_STATUS
+            elif "CONTINUE" in response:
+                return UserIntent.CONTINUE
+
+        except asyncio.TimeoutError:
+            pass  # 超时，使用关键词分类
+        except Exception:
+            pass
+
+        # 降级到关键词分类
+        return self.classify_intent(new_input)
 
     def _extract_topic(self, text: str) -> Optional[str]:
         """提取话题关键词"""
@@ -284,6 +403,19 @@ class TalkerThinkerApp:
 
             await self.task_manager.cancel_current_task()
             return False, None
+
+        elif intent == UserIntent.PAUSE:
+            # 暂停当前任务
+            await self.task_manager.pause_current_task()
+            return True, "\n[系统] 任务已暂停，发送'继续'可恢复"
+
+        elif intent == UserIntent.RESUME:
+            # 恢复当前任务
+            if self.task_manager.is_paused:
+                await self.task_manager.resume_current_task()
+                return True, "\n[系统] 任务已恢复"
+            else:
+                return True, "\n[系统] 当前没有暂停的任务"
 
         else:  # CONTINUE
             # 继续当前任务，忽略新输入或记录为补充信息

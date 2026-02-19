@@ -584,6 +584,105 @@ class ThinkerAgent:
             temperature=self.temperature,
         )
 
+    async def needs_clarification(
+        self,
+        user_input: str,
+        plan: TaskPlan,
+        context: Optional[Dict[str, Any]] = None,
+    ) -> tuple[bool, Optional[str], List[str]]:
+        """
+        检测是否需要澄清
+
+        Args:
+            user_input: 用户输入
+            plan: 任务规划
+            context: 上下文
+
+        Returns:
+            tuple: (是否需要澄清, 澄清原因, 缺失的信息列表)
+        """
+        prompt = f"""分析以下用户请求，判断是否需要进一步澄清：
+
+用户请求：{user_input}
+
+任务意图：{plan.intent}
+
+约束条件：{', '.join(plan.constraints) if plan.constraints else '无'}
+
+请判断：
+1. 用户请求是否有歧义？
+2. 是否缺少关键信息（如时间、地点、预算等）？
+3. 是否需要了解用户偏好才能给出好的建议？
+
+如果需要澄清，请输出：
+{{
+  "needs_clarification": true,
+  "reason": "需要澄清的原因",
+  "missing_info": ["缺失信息1", "缺失信息2"]
+}}
+
+如果不需要澄清，请输出：
+{{
+  "needs_clarification": false
+}}
+
+只输出JSON，不要其他内容。"""
+
+        try:
+            response = await self.llm.generate(prompt, max_tokens=300, temperature=0.3)
+            # 解析JSON
+            import json
+            json_start = response.find("{")
+            json_end = response.rfind("}") + 1
+            if json_start >= 0 and json_end > json_start:
+                data = json.loads(response[json_start:json_end])
+                needs = data.get("needs_clarification", False)
+                reason = data.get("reason", "")
+                missing = data.get("missing_info", [])
+                return needs, reason, missing
+        except Exception:
+            pass
+
+        return False, None, []
+
+    async def generate_clarification_question(
+        self,
+        user_input: str,
+        missing_info: List[str],
+        context: Optional[Dict[str, Any]] = None,
+    ) -> str:
+        """
+        生成澄清问题
+
+        Args:
+            user_input: 用户输入
+            missing_info: 缺失的信息列表
+            context: 上下文
+
+        Returns:
+            str: 澄清问题
+        """
+        missing_str = "、".join(missing_info) if missing_info else "一些信息"
+
+        prompt = f"""用户提出了以下请求：{user_input}
+
+为了更好地帮助用户，需要了解更多关于「{missing_str}」的信息。
+
+请生成一个友好、简洁的澄清问题（不超过50字），询问用户缺失的信息。
+
+要求：
+1. 语气友好自然
+2. 一次只问最关键的问题
+3. 可以提供一些选项帮助用户回答
+
+直接输出问题，不要解释："""
+
+        try:
+            question = await self.llm.generate(prompt, max_tokens=100, temperature=0.7)
+            return question.strip()
+        except Exception:
+            return f"为了更好地帮助您，能告诉我更多关于{missing_str}的信息吗？"
+
     async def _report_progress(self, message: str, progress: float) -> None:
         """报告进度"""
         if self._progress_callback:
