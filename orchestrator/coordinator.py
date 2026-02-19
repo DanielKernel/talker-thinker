@@ -117,7 +117,7 @@ class Orchestrator:
 
         # 构建上下文
         full_context = {
-            **context,
+            **(context or {}),
             "session_id": session_id,
             "messages": session["messages"],
         }

@@ -82,7 +82,12 @@ class OpenAIClient(LLMClient):
             temperature=temperature,
             **kwargs,
         )
-        return response.choices[0].message.content or ""
+        # 安全检查：确保响应有效
+        if response.choices and len(response.choices) > 0:
+            message = response.choices[0].message
+            if message and message.content:
+                return message.content
+        return ""
 
     async def generate_with_messages(
         self,
@@ -99,7 +104,12 @@ class OpenAIClient(LLMClient):
             temperature=temperature,
             **kwargs,
         )
-        return response.choices[0].message.content or ""
+        # 安全检查：确保响应有效
+        if response.choices and len(response.choices) > 0:
+            message = response.choices[0].message
+            if message and message.content:
+                return message.content
+        return ""
 
     async def stream_generate(
         self,
@@ -118,8 +128,11 @@ class OpenAIClient(LLMClient):
             **kwargs,
         )
         async for chunk in stream:
-            if chunk.choices[0].delta.content:
-                yield chunk.choices[0].delta.content
+            # 安全检查：确保 choices 不为空且 delta.content 存在
+            if chunk.choices and len(chunk.choices) > 0:
+                delta = chunk.choices[0].delta
+                if delta and delta.content:
+                    yield delta.content
 
 
 class AnthropicClient(LLMClient):
