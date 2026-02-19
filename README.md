@@ -37,37 +37,66 @@
 
 ## 快速开始
 
-### 安装
+### 一键安装（推荐）
 
 ```bash
 # 克隆仓库
 git clone https://github.com/your-repo/talker-thinker.git
 cd talker-thinker
 
-# 安装依赖
-pip install -r requirements.txt
+# 运行安装脚本（自动创建虚拟环境并安装依赖）
+./setup.sh
 
-# 或使用 pip 安装
-pip install -e .
+# 激活虚拟环境
+source .venv/bin/activate
+
+# 配置 API 密钥
+vim .env
+
+# 运行交互模式
+python main.py -i
 ```
 
-### 配置
+### 手动安装
 
 ```bash
-# 复制环境变量模板
-cp .env.example .env
+# 创建虚拟环境
+python3 -m venv .venv
+source .venv/bin/activate
 
-# 编辑 .env 文件，填入你的API密钥
+# 安装依赖（国内用户使用清华镜像源）
+pip install -r requirements.txt -i https://pypi.tuna.tsinghua.edu.cn/simple --trusted-host pypi.tuna.tsinghua.edu.cn
+
+# 配置 API 密钥
+cp .env.example .env
+vim .env
 ```
+
+## 模型配置
 
 默认使用火山引擎模型：
-- **Talker模型**: DeepSeek-V3.2（快速响应）
-- **Thinker模型**: Kimi-K2-thinking（深度推理）
-- **Base URL**: https://ark.cn-beijing.volces.com/api/coding/v3
 
-### 运行
+| 组件 | 模型 | 用途 |
+|------|------|------|
+| Talker | DeepSeek-V3.2 | 快速响应、意图分类 |
+| Thinker | Kimi-K2-thinking | 深度推理、任务规划 |
+| Base URL | https://ark.cn-beijing.volces.com/api/coding/v3 | API端点 |
+
+在 `.env` 文件中配置：
 
 ```bash
+LLM_BASE_URL=https://ark.cn-beijing.volces.com/api/coding/v3
+VOLCES_API_KEY=your-api-key
+TALKER_MODEL=DeepSeek-V3.2
+THINKER_MODEL=Kimi-K2-thinking
+```
+
+## 运行
+
+```bash
+# 激活虚拟环境
+source .venv/bin/activate
+
 # 交互模式
 python main.py -i
 
@@ -76,6 +105,9 @@ python main.py -q "你好"
 
 # 查看统计
 python main.py --stats
+
+# 退出虚拟环境
+deactivate
 ```
 
 ## 使用示例
@@ -128,6 +160,26 @@ asyncio.run(main())
 - **L3 Long-term Memory**: PostgreSQL，用户档案，永久
 - **L4 Knowledge Base**: 向量数据库，RAG检索
 
+## 项目结构
+
+```
+talker-thinker/
+├── agents/                 # Agent模块
+│   ├── talker/            # Talker Agent
+│   ├── thinker/           # Thinker Agent
+│   └── llm_client.py      # LLM客户端
+├── orchestrator/          # 协调器
+├── context/               # 上下文管理
+├── skills/                # 技能系统
+├── monitoring/            # 监控模块
+├── config/                # 配置
+├── tests/                 # 测试
+├── main.py                # 主程序入口
+├── setup.sh               # 一键安装脚本
+├── requirements.txt       # 依赖列表
+└── .env.example           # 环境变量模板
+```
+
 ## 扩展开发
 
 ### 添加新Skill
@@ -164,6 +216,22 @@ class MyLLMClient(LLMClient):
         pass
 ```
 
+## 测试
+
+```bash
+# 激活虚拟环境
+source .venv/bin/activate
+
+# 运行所有测试
+pytest tests/
+
+# 运行特定测试
+pytest tests/test_agents.py -v
+
+# 生成覆盖率报告
+pytest --cov=. tests/
+```
+
 ## 部署
 
 ### Docker
@@ -176,30 +244,6 @@ docker-compose up -d
 
 ```bash
 kubectl apply -f k8s/
-```
-
-## 监控
-
-系统内置Prometheus指标暴露：
-
-```python
-from monitoring.metrics import get_metrics_collector
-
-metrics = get_metrics_collector()
-print(metrics.export_prometheus())
-```
-
-## 测试
-
-```bash
-# 运行所有测试
-pytest tests/
-
-# 运行特定测试
-pytest tests/test_agents.py -v
-
-# 生成覆盖率报告
-pytest --cov=. tests/
 ```
 
 ## 文档

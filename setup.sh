@@ -3,6 +3,8 @@
 
 set -e
 
+MIRROR="https://pypi.tuna.tsinghua.edu.cn/simple"
+
 echo "=== Talker-Thinker 环境设置 ==="
 
 # 检查 Python 版本
@@ -24,23 +26,13 @@ echo "虚拟环境创建成功"
 echo "正在激活虚拟环境..."
 source .venv/bin/activate
 
-# 在虚拟环境中配置镜像源
-echo "正在配置 pip 镜像源（清华源）..."
-mkdir -p .venv/pip.conf.d
-cat > .venv/pip.conf << 'EOF'
-[global]
-index-url = https://pypi.tuna.tsinghua.edu.cn/simple
-trusted-host = pypi.tuna.tsinghua.edu.cn
-EOF
-export PIP_CONFIG_FILE=.venv/pip.conf
-
-# 升级 pip
+# 升级 pip（使用镜像源）
 echo "正在升级 pip..."
-pip install --upgrade pip -i https://pypi.tuna.tsinghua.edu.cn/simple
+pip install --upgrade pip -i "$MIRROR" --trusted-host pypi.tuna.tsinghua.edu.cn
 
-# 安装依赖
-echo "正在安装依赖..."
-pip install -r requirements.txt -i https://pypi.tuna.tsinghua.edu.cn/simple
+# 安装依赖（使用镜像源）
+echo "正在安装依赖（使用清华镜像源）..."
+pip install -r requirements.txt -i "$MIRROR" --trusted-host pypi.tuna.tsinghua.edu.cn
 
 # 复制环境变量模板
 if [ ! -f ".env" ]; then
