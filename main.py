@@ -25,6 +25,8 @@ class UserIntent(Enum):
     QUERY_STATUS = "status"    # 查询状态
     PAUSE = "pause"            # 暂停当前任务
     RESUME = "resume"          # 恢复当前任务
+    COMMENT = "comment"        # 评论/感叹（不打断任务）
+    BACKCHANNEL = "backchannel"  # 附和/应答（不打断任务）
 
 
 class TaskManager:
@@ -110,7 +112,12 @@ class TaskManager:
 
     def classify_intent(self, new_input: str) -> UserIntent:
         """
-        分类用户意图：继续、替换、修改当前任务
+        分类用户意图：基于语义理解，不是所有输入都应该打断任务
+
+        关键改进：
+        1. 默认不打断（COMMENT），只有明确的取消意图才打断
+        2. 识别评论/感叹类输入，这类不应该打断任务
+        3. 识别附和/应答类输入，保持任务继续
 
         基于关键词的快速分类（同步方法，用于快速判断）
         """
@@ -119,67 +126,95 @@ class TaskManager:
 
         text = new_input.lower().strip()
 
-        # 明确的取消/替换关键词
+        # === 1. 首先检测附和/应答（最不打断） ===
+        backchannel_patterns = [
+            "嗯", "嗯嗯", "好的", "好", "行", "可以", "对", "是",
+            "ok", "okay", "yes", "right", "明白", "了解", "收到",
+        ]
+        if text in backchannel_patterns or len(text) <= 2:
+            return UserIntent.BACKCHANNEL
+
+        # === 2. 检测评论/感叹（不打断任务） ===
+        comment_patterns = [
+            "不错", "很好", "太好了", "厉害", "赞", "可以啊",
+            "挺好", "还行", "好的呀", "是吗", "真的吗",
+            "interesting", "cool", "nice", "good", "great",
+        ]
+        # 评论通常是：主语 + 评价词，如 "鸿蒙智行的车不错"
+        if any(pattern in text for pattern in comment_patterns):
+            # 检查是否包含新的问题词（如果有则可能是新问题）
+            question_patterns = ["吗", "？", "?", "呢", "什么", "怎么", "如何", "为什么"]
+            if not any(q in text for q in question_patterns):
+                return UserIntent.COMMENT
+
+        # === 3. 明确的取消/替换关键词 ===
         cancel_keywords = [
-            "不用", "算了", "取消", "停止", "停", "不要了", "不用了",
-            "换个", "改", "重新", "直接", "先", "算了",
+            "不用了", "不要了", "算了", "取消", "停止", "停",
+            "换个", "重新", "不看了", "不做了",
             "stop", "cancel", "never mind", "forget it",
         ]
         if any(kw in text for kw in cancel_keywords):
             return UserIntent.REPLACE
 
-        # 查询状态
+        # === 4. 查询状态 ===
         status_keywords = [
-            "进度", "怎么样", "好了吗", "完成", "状态", "多久",
-            "在吗", "还在吗", "继续", "等等",
+            "进度", "怎么样", "好了吗", "完成没", "状态", "多久",
+            "还在吗", "到哪了",
         ]
         if any(kw in text for kw in status_keywords):
             return UserIntent.QUERY_STATUS
 
-        # 补充/修改信息的关键词
+        # === 5. 补充/修改信息的关键词 ===
         modify_keywords = [
             "另外", "还有", "加上", "补充", "再加", "也要",
-            "或者", "改为", "换成", "最好是",
+            "或者", "改为", "换成", "最好是", "注意",
         ]
         if any(kw in text for kw in modify_keywords):
             return UserIntent.MODIFY
 
-        # 暂停关键词
-        pause_keywords = [
-            "暂停", "等一下", "稍等", "等会", "先停", "pause",
-        ]
+        # === 6. 暂停/恢复关键词 ===
+        pause_keywords = ["暂停", "等一下", "稍等", "等会", "先停", "pause"]
         if any(kw in text for kw in pause_keywords):
             return UserIntent.PAUSE
 
-        # 恢复关键词
-        resume_keywords = [
-            "继续", "恢复", "接着", "resume", "continue",
-        ]
+        resume_keywords = ["继续", "恢复", "接着", "resume", "continue", "go on"]
         if any(kw in text for kw in resume_keywords):
             return UserIntent.RESUME
 
-        # 回答澄清问题的关键词
+        # === 7. 回答澄清问题 ===
         clarify_keywords = [
             "是", "对", "好", "可以", "要", "大概", "左右",
             "万", "块", "元", "预算",
         ]
         if any(kw in text for kw in clarify_keywords) and len(text) < 30:
-            return UserIntent.CONTINUE  # 可能是回答澄清问题
+            return UserIntent.CONTINUE
 
-        # 检查是否是全新的话题
-        # 如果新问题和当前任务差异很大，认为是替换
-        current_topic = self._extract_topic(self._current_input)
-        new_topic = self._extract_topic(new_input)
+        # === 8. 检查是否是全新的问题（需要打断） ===
+        # 新问题的特征：包含疑问词或问号
+        question_indicators = [
+            "？", "?", "吗", "呢", "什么", "怎么", "如何", "为什么",
+            "哪个", "哪些", "多少", "几", "谁", "哪",
+            "帮我", "给我", "推荐", "分析", "比较", "查一下",
+        ]
+        has_question = any(q in text for q in question_indicators)
 
-        # 如果话题完全不同，认为是替换意图
-        if current_topic and new_topic and current_topic != new_topic:
-            # 但如果新输入很短（如"快点"），可能是催促而非替换
-            if len(text) > 5:
+        if has_question:
+            # 检查是否与当前任务相关
+            current_topic = self._extract_topic(self._current_input)
+            new_topic = self._extract_topic(new_input)
+
+            # 如果话题相同，可能是补充问题
+            if current_topic and new_topic and current_topic == new_topic:
+                return UserIntent.MODIFY
+
+            # 话题不同的问题，才考虑替换
+            if len(text) > 10:  # 短输入可能是误触
                 return UserIntent.REPLACE
 
-        # 默认：如果当前有任务在运行，新输入视为替换
-        # 因为用户不太会在等待时提供补充信息
-        return UserIntent.REPLACE
+        # === 9. 默认：不打断任务 ===
+        # 关键改变：之前默认是REPLACE，现在默认是COMMENT
+        # 这样可以避免误打断用户的评论/感叹
+        return UserIntent.COMMENT
 
     async def classify_intent_with_llm(
         self,
@@ -189,6 +224,10 @@ class TaskManager:
     ) -> UserIntent:
         """
         使用LLM进行更智能的意图分类
+
+        关键改进：
+        - 区分评论/感叹（不打断）和取消请求（打断）
+        - 考虑当前任务上下文
 
         Args:
             new_input: 用户新输入
@@ -203,15 +242,23 @@ class TaskManager:
 
         prompt = f"""系统正在处理用户的任务：{self._current_input[:100]}
 
-用户现在说：{new_input}
+用户在等待过程中说：{new_input}
 
-请判断用户的意图是哪一种：
-1. REPLACE - 取消当前任务，开始新任务
-2. MODIFY - 修改或补充当前任务的信息
-3. QUERY_STATUS - 查询当前任务的进度
-4. CONTINUE - 继续当前任务（可能是回答系统的澄清问题）
+请判断用户这句话的意图（注意：不要过度解读，用户可能只是随口评论）：
 
-只返回意图类型（REPLACE/MODIFY/QUERY_STATUS/CONTINUE），不要解释。"""
+1. COMMENT - 评论/感叹（如"不错"、"挺好的"、"这个好"）
+2. BACKCHANNEL - 简单附和（如"嗯"、"好的"、"明白"）
+3. MODIFY - 补充当前任务的信息（如"再加上..."、"还有..."）
+4. QUERY_STATUS - 查询进度（如"好了吗"、"怎么样"）
+5. REPLACE - 取消当前任务开始新任务（如"算了"、"不用了"、"帮我查xxx"）
+6. CONTINUE - 回答系统的澄清问题
+
+重要规则：
+- 如果只是评论或感叹，返回COMMENT，不要误判为REPLACE
+- 如果是简短的应答，返回BACKCHANNEL
+- 只有明确表示取消或提出全新问题才返回REPLACE
+
+只返回一个意图类型，不要解释。"""
 
         try:
             import asyncio
@@ -227,6 +274,10 @@ class TaskManager:
                 return UserIntent.MODIFY
             elif "QUERY_STATUS" in response or "STATUS" in response:
                 return UserIntent.QUERY_STATUS
+            elif "COMMENT" in response:
+                return UserIntent.COMMENT
+            elif "BACKCHANNEL" in response:
+                return UserIntent.BACKCHANNEL
             elif "CONTINUE" in response:
                 return UserIntent.CONTINUE
 
@@ -376,15 +427,28 @@ class TalkerThinkerApp:
         """
         处理任务进行中的新输入
 
+        关键改进：
+        - COMMENT和BACKCHANNEL不打断任务
+        - 只有REPLACE才真正取消任务
+
         Returns:
             tuple: (是否已处理, 响应内容)
         """
         intent = self.task_manager.classify_intent(new_input)
 
-        if intent == UserIntent.QUERY_STATUS:
+        if intent == UserIntent.COMMENT:
+            # 评论/感叹，不打断任务，静默记录
+            # 可以选择性地给简短反馈，但不要打断
+            return True, None  # None表示不输出任何内容，保持安静
+
+        elif intent == UserIntent.BACKCHANNEL:
+            # 附和/应答，不打断任务
+            return True, None  # 完全静默
+
+        elif intent == UserIntent.QUERY_STATUS:
             # 查询状态，不取消任务
             current = self.task_manager.current_input
-            return True, f"\n[系统] 正在处理: {current[:50]}... 请稍候或发送新问题"
+            return True, f"\n[系统] 正在处理: {current[:50]}... 请稍候"
 
         elif intent == UserIntent.REPLACE:
             # 取消当前任务，处理新任务
@@ -396,13 +460,9 @@ class TalkerThinkerApp:
             return False, None  # 返回False表示需要处理新任务
 
         elif intent == UserIntent.MODIFY:
-            # 修改当前任务（这里简化为替换）
-            print("\n" + "━" * 50)
-            print("🔄 正在调整任务...")
-            print("━" * 50)
-
-            await self.task_manager.cancel_current_task()
-            return False, None
+            # 补充信息，记录但不取消任务
+            # TODO: 实际实现应该将补充信息传递给正在运行的任务
+            return True, "\n[系统] 已收到补充信息"
 
         elif intent == UserIntent.PAUSE:
             # 暂停当前任务
@@ -418,8 +478,8 @@ class TalkerThinkerApp:
                 return True, "\n[系统] 当前没有暂停的任务"
 
         else:  # CONTINUE
-            # 继续当前任务，忽略新输入或记录为补充信息
-            return True, "\n[系统] 收到补充信息，正在处理中..."
+            # 继续当前任务
+            return True, None
 
     async def run_interactive(self) -> None:
         """

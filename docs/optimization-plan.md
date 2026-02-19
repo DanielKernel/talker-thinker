@@ -643,12 +643,123 @@ class TaskManager:
 
 ---
 
-## 6. 实施优先级
+## 6. 智能打断机制优化（⭐重要改进）
+
+### 6.1 问题描述
+
+**问题现象**：用户在任务处理过程中说"鸿蒙智行的车不错"，系统误判为打断任务
+
+```
+[步骤2] 多维度数据采集...
+鸿蒙智行的车不错
+
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+⚠️ 上一任务已被用户打断  ← 错误！用户只是在评论
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+```
+
+**根本原因**：
+1. 默认行为是REPLACE（取消任务）
+2. 缺乏COMMENT/BACKCHANNEL意图识别
+3. 没有区分"评论"和"取消请求"
+
+### 6.2 参考的最佳实践
+
+基于以下研究：
+- [FullDuplexBench](https://arxiv.org/abs/2503.04721) - 全双工对话评估框架
+- [FireRedChat](https://arxiv.org/html/2509.06502v1) - 全双工语音交互系统
+- [AsyncVoice Agent](https://arxiv.org/html/2510.16156v1) - 实时语音代理
+
+关键洞察：
+1. **Backchannel（附和）**："嗯"、"好的" - 不应打断
+2. **Comment（评论）**："不错"、"挺好" - 不应打断
+3. **只有明确的Cancel意图才打断**
+
+### 6.3 实施方案
+
+#### 6.3.1 新增意图类型
+
+```python
+class UserIntent(Enum):
+    CONTINUE = "continue"      # 继续当前任务
+    REPLACE = "replace"        # 取消当前任务，开始新任务
+    MODIFY = "modify"          # 修改当前任务
+    QUERY_STATUS = "status"    # 查询状态
+    PAUSE = "pause"            # 暂停当前任务
+    RESUME = "resume"          # 恢复当前任务
+    COMMENT = "comment"        # 评论/感叹（不打断任务）⭐新增
+    BACKCHANNEL = "backchannel"  # 附和/应答（不打断任务）⭐新增
+```
+
+#### 6.3.2 改进的意图分类逻辑
+
+```python
+def classify_intent(self, new_input: str) -> UserIntent:
+    # 1. 首先检测附和/应答（最不打断）
+    if text in ["嗯", "好的", "行", "可以"]:
+        return UserIntent.BACKCHANNEL
+
+    # 2. 检测评论/感叹（不打断任务）
+    if any(pattern in text for pattern in ["不错", "很好", "挺好"]):
+        return UserIntent.COMMENT
+
+    # 3. 明确的取消关键词才打断
+    if any(kw in text for kw in ["不用了", "算了", "取消"]):
+        return UserIntent.REPLACE
+
+    # ...
+
+    # 9. 默认：不打断任务（关键改变！）
+    return UserIntent.COMMENT  # 之前是 REPLACE
+```
+
+#### 6.3.3 处理逻辑
+
+```python
+async def _handle_new_input_during_processing(self, new_input, session_id):
+    intent = self.task_manager.classify_intent(new_input)
+
+    if intent == UserIntent.COMMENT:
+        # 评论/感叹，不打断任务，静默
+        return True, None
+
+    elif intent == UserIntent.BACKCHANNEL:
+        # 附和/应答，完全静默
+        return True, None
+
+    elif intent == UserIntent.REPLACE:
+        # 只有这个才真正取消任务
+        await self.task_manager.cancel_current_task()
+        return False, None
+```
+
+### 6.4 测试用例
+
+| 用户输入 | 预期意图 | 是否打断任务 |
+|----------|----------|--------------|
+| "鸿蒙智行的车不错" | COMMENT | ❌ 不打断 |
+| "嗯嗯" | BACKCHANNEL | ❌ 不打断 |
+| "算了，不用了" | REPLACE | ✅ 打断 |
+| "再加上预算20万" | MODIFY | ❌ 不打断 |
+| "进度怎么样" | QUERY_STATUS | ❌ 不打断 |
+
+### 6.5 涉及的文件
+
+- `main.py`:
+  - `UserIntent` 枚举 - 新增COMMENT和BACKCHANNEL
+  - `TaskManager.classify_intent()` - 改进意图分类逻辑
+  - `TaskManager.classify_intent_with_llm()` - LLM分类支持
+  - `TalkerThinkerApp._handle_new_input_during_processing()` - 处理逻辑
+
+---
+
+## 7. 实施优先级
 
 ### P0 - 立即修复
 - [x] 播报系统优化（已完成）
 - [x] 动态播报间隔（已完成）
 - [x] 记忆相关问题的快速修复（已完成）
+- [x] 智能打断机制优化（已完成）⭐新增
 
 ### P1 - 近期优化
 - [x] 启用SessionContext进行会话存储（已完成）
@@ -729,6 +840,14 @@ python main.py -i
 
 ## 9. 更新日志
 
+### 2026-02-20（第三次更新）
+- **智能打断机制优化**（重要）：
+  - 新增COMMENT和BACKCHANNEL意图类型
+  - 默认行为从REPLACE改为COMMENT（不打断）
+  - 只有明确取消意图才打断任务
+  - 参考FullDuplexBench、FireRedChat等最佳实践
+- 修复问题：用户评论"不错"不再错误打断任务
+
 ### 2026-02-20（第二次更新）
 - 完成SessionContext集成：支持Redis持久化，不可用时降级到内存
 - 完成Skills系统：注册默认技能，注入SkillInvoker到Thinker
@@ -763,4 +882,23 @@ python main.py -i
 | `context/__init__.py` | 导出SharedContext |
 | `agents/thinker/agent.py` | 添加澄清检测和问题生成方法 |
 | `agents/talker/agent.py` | 改进记忆处理 |
-| `main.py` | 添加LLM意图分类、暂停/恢复机制 |
+| `main.py` | 添加LLM意图分类、暂停/恢复机制、智能打断机制 |
+
+---
+
+## 12. 参考资料
+
+### 全双工交互与打断机制
+- [FullDuplexBench](https://arxiv.org/abs/2503.04721) - 全双工对话评估框架
+- [FullDuplex-Bench-v2](https://arxiv.org/html/2510.07838v1) - 多轮评估框架
+- [FireRedChat](https://arxiv.org/html/2509.06502v1) - 全双工语音交互系统
+- [AsyncVoice Agent](https://arxiv.org/html/2510.16156v1) - 实时语音代理，sub-100ms延迟
+
+### 业界实践
+- [Soul App全双工语音模型](https://k.sina.cn/article_7857201856_1d45362c001902eiqw.html) - 主动打破沉默、适时打断
+- [Pipecat中断处理](https://m.blog.csdn.net/gitblog_00106/article/details/152191000) - 类人对话体验
+- [AI语音助手打断机制](https://appstore.blog.csdn.net/article/details/156638975) - 意图分类与任务调度
+
+### Agent协作
+- [LangGraph Platform](https://www.langchain.com/langgraph) - 原生token-by-token流式输出
+- [豆包AI助手](https://baike.baidu.com/item/%E8%B1%86%E5%8C%85%E5%A4%A7%E6%A8%A1%E5%9E%8B/64418493) - 低时延可打断语音对话
