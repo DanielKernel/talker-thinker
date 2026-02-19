@@ -22,6 +22,11 @@ fi
 echo "正在激活虚拟环境..."
 source .venv/bin/activate
 
+# 配置国内镜像源
+echo "正在配置 pip 镜像源..."
+pip config set global.index-url https://pypi.tuna.tsinghua.edu.cn/simple
+pip config set global.trusted-host pypi.tuna.tsinghua.edu.cn
+
 # 升级 pip
 echo "正在升级 pip..."
 pip install --upgrade pip
