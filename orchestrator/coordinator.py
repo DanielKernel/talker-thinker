@@ -216,49 +216,84 @@ class Orchestrator:
         # 记录LLM请求发送时间
         llm_request_time = time.time()
         if settings.SHOW_AGENT_IDENTITY:
-            yield f"[LLM请求: {format_timestamp(llm_request_time)}]\n"
+            yield f"[LLM请求发送: {format_timestamp(llm_request_time)}]\n"
 
-        # 超时检测：如果TTFT超过2秒，提示用户
-        first_chunk_time = None
-        chunk_count = 0
-        should_handoff = False
+        # 进度消息
+        progress_shown = False
+        last_output_time = time.time()
+        progress_interval = 3.0  # 3秒无输出则显示进度
 
-        async for chunk in self.talker.process(user_input, context):
-            chunk_count += 1
+        # 使用队列收集Talker输出
+        talker_queue = asyncio.Queue()
+        talker_complete = False
 
-            # 检查是否需要转交给Thinker
-            if "[NEEDS_THINKER]" in chunk:
-                # 记录Handoff
-                self._record_handoff(
-                    HandoffType.DELEGATION,
-                    "talker",
-                    "thinker",
-                    "任务复杂度超过Talker能力",
-                )
+        async def run_talker():
+            """运行Talker并收集输出"""
+            nonlocal talker_complete
+            async for chunk in self.talker.process(user_input, context):
+                await talker_queue.put(chunk)
+            talker_complete = True
 
-                # 切换到协作模式
-                async for thinker_chunk in self._collaboration_handoff(
-                    user_input, context, llm_request_time, received_time=received_time
-                ):
-                    yield thinker_chunk
-                return
+        # 启动Talker任务
+        talker_task = asyncio.create_task(run_talker())
 
-            # 记录第一个有效内容的时间
-            if first_chunk_time is None and chunk.strip() and "收到" not in chunk and "好的" not in chunk:
-                first_chunk_time = time.time()
-                # 如果TTFT超过2秒，警告并考虑转交
-                ttft = (first_chunk_time - llm_request_time) * 1000
-                if ttft > 2000 and settings.SHOW_AGENT_IDENTITY:
-                    yield f"\n[⚠️ 响应较慢({ttft:.0f}ms)，建议此类任务交由Thinker处理]\n"
+        # 处理Talker输出
+        first_token_time = None
+        first_real_content_shown = False
 
-            yield chunk
+        while not talker_complete or not talker_queue.empty():
+            try:
+                # 尝试获取输出，带超时
+                chunk = await asyncio.wait_for(talker_queue.get(), timeout=0.5)
+                last_output_time = time.time()
+
+                # 检查是否需要转交给Thinker
+                if "[NEEDS_THINKER]" in chunk:
+                    # 记录Handoff
+                    self._record_handoff(
+                        HandoffType.DELEGATION,
+                        "talker",
+                        "thinker",
+                        "任务复杂度超过Talker能力",
+                    )
+
+                    # 切换到协作模式
+                    async for thinker_chunk in self._collaboration_handoff(
+                        user_input, context, llm_request_time, received_time=received_time
+                    ):
+                        yield thinker_chunk
+                    return
+
+                # 记录第一个有效内容的时间（排除即时反馈语）
+                if first_token_time is None and chunk.strip():
+                    if "收到" not in chunk and "好的" not in chunk and "让我" not in chunk and "\n" not in chunk:
+                        first_token_time = time.time()
+                        if settings.SHOW_AGENT_IDENTITY and not first_real_content_shown:
+                            yield f"\n[助手首Token: {format_timestamp(first_token_time)}]\n"
+                            first_real_content_shown = True
+                        ttft = (first_token_time - llm_request_time) * 1000
+                        if ttft > 2000 and settings.SHOW_AGENT_IDENTITY:
+                            yield f"[⚠️ 响应较慢({ttft:.0f}ms)，建议此类任务交由Thinker处理]\n"
+
+                yield chunk
+                progress_shown = False
+
+            except asyncio.TimeoutError:
+                # 超时，检查是否需要显示进度
+                current_time = time.time()
+                if current_time - last_output_time >= progress_interval:
+                    elapsed = current_time - llm_request_time
+                    if not progress_shown:
+                        yield f"\n[Talker播报] ⏳ 正在等待模型响应... (已耗时 {elapsed:.0f}s)"
+                        progress_shown = True
+                    last_output_time = current_time
 
         # 显示详细指标
         if settings.SHOW_AGENT_IDENTITY:
             metrics = context.get("_llm_metrics", {}) if context else {}
-            yield "\n" + self._format_metrics(metrics, llm_request_time)
+            yield "\n" + self._format_metrics(metrics, llm_request_time, first_token_time)
 
-    def _format_metrics(self, metrics: dict, llm_request_time: float) -> str:
+    def _format_metrics(self, metrics: dict, llm_request_time: float, first_token_time: float = None) -> str:
         """格式化指标输出"""
         def format_timestamp(t):
             ts = time.strftime("%H:%M:%S", time.localtime(t))
@@ -291,7 +326,10 @@ class Orchestrator:
         if tps:
             lines.append(f"  TPS(模型吞吐): {tps:.1f} tokens/s")
 
+        # 时间戳
         lines.append(f"  LLM请求发送时间: {format_timestamp(llm_request_time)}")
+        if first_token_time:
+            lines.append(f"  LLM首Token时间: {format_timestamp(first_token_time)}")
         lines.append("-" * 50)
 
         return "\n".join(lines)
@@ -330,15 +368,79 @@ class Orchestrator:
             "启动协作模式",
         )
 
-        # 显示Thinker身份标识和LLM请求时间
+        # 显示Thinker身份标识和LLM请求发送时间
         if settings.SHOW_AGENT_IDENTITY:
-            yield f"[Thinker | LLM请求: {format_timestamp(thinker_start)}]\n"
+            yield f"[Thinker | LLM请求发送: {format_timestamp(thinker_start)}]\n"
 
-        # 收集Thinker的输出
+        # 进度消息队列和状态
+        progress_messages = [
+            "🔍 正在分析您的需求...",
+            "📋 正在制定执行计划...",
+            "⚙️ 正在处理中...",
+            "📊 正在整理数据...",
+            "✨ 正在优化结果...",
+        ]
+        progress_index = 0
+        last_progress_time = time.time()
+        progress_interval = 2.0  # 每2秒显示一次进度
+
+        # 收集Thinker的输出，并跟踪首Token时间
         thinker_output = []
-        async for chunk in self.thinker.process(user_input, context):
-            thinker_output.append(chunk)
-            yield chunk
+        first_token_time = None
+        first_real_content_shown = False
+        thinker_complete = False
+
+        async def run_thinker():
+            """运行Thinker并收集输出"""
+            nonlocal thinker_complete
+            async for chunk in self.thinker.process(user_input, context):
+                thinker_output.append(chunk)
+            thinker_complete = True
+
+        # 启动Thinker任务
+        thinker_task = asyncio.create_task(run_thinker())
+
+        # 处理Thinker输出并提供进度反馈
+        output_index = 0
+        while not thinker_complete or output_index < len(thinker_output):
+            # 检查是否有新的Thinker输出
+            if output_index < len(thinker_output):
+                chunk = thinker_output[output_index]
+                output_index += 1
+
+                # 记录第一个有效内容的时间
+                if first_token_time is None and chunk.strip():
+                    if not chunk.strip().startswith("[") and "思考" not in chunk and "规划" not in chunk and "步骤" not in chunk:
+                        first_token_time = time.time()
+                        if settings.SHOW_AGENT_IDENTITY and not first_real_content_shown:
+                            yield f"\n[助手首Token: {format_timestamp(first_token_time)}]\n"
+                            first_real_content_shown = True
+
+                yield chunk
+                last_progress_time = time.time()
+            else:
+                # 没有新输出时，检查是否需要显示进度消息
+                current_time = time.time()
+                if current_time - last_progress_time >= progress_interval:
+                    if progress_index < len(progress_messages):
+                        elapsed = current_time - thinker_start
+                        yield f"\n[Talker播报] {progress_messages[progress_index]} (已耗时 {elapsed:.0f}s)"
+                        progress_index += 1
+                        last_progress_time = current_time
+                    else:
+                        # 循环显示进度
+                        progress_index = 0
+                        elapsed = current_time - thinker_start
+                        yield f"\n[Talker播报] ⏳ 仍在处理中，请稍候... (已耗时 {elapsed:.0f}s)"
+                        last_progress_time = current_time
+
+                # 短暂等待，避免忙等待
+                await asyncio.sleep(0.1)
+
+        # 确保所有输出都已处理
+        while output_index < len(thinker_output):
+            yield thinker_output[output_index]
+            output_index += 1
 
         # 完整的Thinker输出
         full_output = "".join(thinker_output)
@@ -354,7 +456,7 @@ class Orchestrator:
         # 显示详细指标
         if settings.SHOW_AGENT_IDENTITY:
             metrics = context.get("_llm_metrics", {}) if context else {}
-            yield "\n" + self._format_metrics(metrics, thinker_start)
+            yield "\n" + self._format_metrics(metrics, thinker_start, first_token_time)
 
     async def _parallel_handoff(
         self,
