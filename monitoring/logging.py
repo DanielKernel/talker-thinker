@@ -1,0 +1,132 @@
+"""
+Structured Logger - 结构化日志记录
+"""
+import logging
+import sys
+import time
+from typing import Any, Dict, Optional
+
+try:
+    import structlog
+    HAS_STRUCTLOG = True
+except ImportError:
+    HAS_STRUCTLOG = False
+
+from config import settings
+
+
+class StructuredLogger:
+    """
+    结构化日志记录器
+
+    支持JSON格式输出和上下文绑定
+    """
+
+    def __init__(self, name: str):
+        self.name = name
+        self._logger = logging.getLogger(name)
+        self._logger.setLevel(getattr(logging, settings.LOG_LEVEL))
+
+        # 控制台处理器
+        if not self._logger.handlers:
+            console_handler = logging.StreamHandler(sys.stdout)
+            console_handler.setFormatter(logging.Formatter(
+                '%(asctime)s [%(levelname)s] %(name)s - %(message)s'
+            ))
+            self._logger.addHandler(console_handler)
+
+        # 上下文
+        self._context: Dict[str, Any] = {}
+
+    def bind(self, **kwargs) -> "StructuredLogger":
+        """绑定上下文"""
+        self._context.update(kwargs)
+        return self
+
+    def unbind(self, *keys) -> "StructuredLogger":
+        """解除绑定上下文"""
+        for key in keys:
+            self._context.pop(key, None)
+        return self
+
+    def _log(self, level: int, message: str, **kwargs) -> None:
+        """内部日志方法"""
+        extra = {**self._context, **kwargs}
+        extra_str = " | ".join(f"{k}={v}" for k, v in extra.items())
+        full_message = f"{message} | {extra_str}" if extra_str else message
+        self._logger.log(level, full_message)
+
+    def debug(self, message: str, **kwargs) -> None:
+        self._log(logging.DEBUG, message, **kwargs)
+
+    def info(self, message: str, **kwargs) -> None:
+        self._log(logging.INFO, message, **kwargs)
+
+    def warning(self, message: str, **kwargs) -> None:
+        self._log(logging.WARNING, message, **kwargs)
+
+    def error(self, message: str, **kwargs) -> None:
+        self._log(logging.ERROR, message, **kwargs)
+
+    def critical(self, message: str, **kwargs) -> None:
+        self._log(logging.CRITICAL, message, **kwargs)
+
+    def log_request(
+        self,
+        request_id: str,
+        agent: str,
+        task: str,
+        start_time: float,
+        end_time: Optional[float] = None,
+        status: str = "completed",
+        error: Optional[str] = None,
+    ) -> None:
+        """记录请求"""
+        end_time = end_time or time.time()
+        duration_ms = (end_time - start_time) * 1000
+
+        self.info(
+            "request_processed",
+            request_id=request_id,
+            agent=agent,
+            task=task[:100],
+            duration_ms=round(duration_ms, 2),
+            status=status,
+            error=error,
+        )
+
+    def log_handoff(
+        self,
+        from_agent: str,
+        to_agent: str,
+        reason: str,
+    ) -> None:
+        """记录Handoff"""
+        self.info(
+            "agent_handoff",
+            from_agent=from_agent,
+            to_agent=to_agent,
+            reason=reason,
+        )
+
+    def log_skill_invocation(
+        self,
+        skill_name: str,
+        params: Dict[str, Any],
+        success: bool,
+        latency_ms: float,
+        error: Optional[str] = None,
+    ) -> None:
+        """记录技能调用"""
+        self.info(
+            "skill_invoked",
+            skill=skill_name,
+            success=success,
+            latency_ms=round(latency_ms, 2),
+            error=error,
+        )
+
+
+def get_logger(name: str) -> StructuredLogger:
+    """获取日志记录器"""
+    return StructuredLogger(name)
