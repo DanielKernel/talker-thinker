@@ -161,6 +161,15 @@ class Orchestrator:
 
         Talker处理简单/中等任务，复杂任务委托给Thinker
         """
+        # 显示Agent身份标识
+        if settings.SHOW_AGENT_IDENTITY:
+            complexity_str = {
+                TaskComplexity.SIMPLE: "简单",
+                TaskComplexity.MEDIUM: "中等",
+                TaskComplexity.COMPLEX: "复杂",
+            }.get(classification.complexity, "未知")
+            yield f"[Talker | {complexity_str}任务]\n"
+
         async for chunk in self.talker.process(user_input, context):
             # 检查是否需要转交给Thinker
             if "[NEEDS_THINKER]" in chunk:
@@ -192,6 +201,8 @@ class Orchestrator:
         Talker收集信息，Thinker深度处理，Talker播报
         """
         # Talker首先给用户反馈
+        if settings.SHOW_AGENT_IDENTITY:
+            yield "[Talker -> Thinker | 复杂任务转交]\n"
         yield "好的，这个问题需要我深度思考一下...\n\n"
 
         # 记录Handoff到Thinker
@@ -201,6 +212,10 @@ class Orchestrator:
             "thinker",
             "启动协作模式",
         )
+
+        # 显示Thinker身份标识
+        if settings.SHOW_AGENT_IDENTITY:
+            yield "[Thinker | 深度思考中]\n"
 
         # 收集Thinker的输出
         thinker_output = []

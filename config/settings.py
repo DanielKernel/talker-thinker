@@ -59,6 +59,7 @@ class Settings(BaseSettings):
     ENABLE_PROGRESS_NOTIFICATION: bool = True
     ENABLE_PROACTIVE_CONVERSATION: bool = True
     ENABLE_SELF_REFLECTION: bool = True
+    SHOW_AGENT_IDENTITY: bool = True  # 显示Agent身份标识
 
     # 数据库配置
     DATABASE_URL: Optional[str] = None
