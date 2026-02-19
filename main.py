@@ -121,10 +121,11 @@ class TaskManager:
         分类用户意图：基于语义理解，不是所有输入都应该打断任务
 
         关键改进：
-        1. 默认不打断（COMMENT），只有明确的取消意图才打断
-        2. 识别评论/感叹类输入，这类不应该打断任务
-        3. 识别附和/应答类输入，保持任务继续
-        4. 识别用户等待中的疑问，给与回应
+        1. 优先检测取消意图（最高优先级）
+        2. 默认不打断（COMMENT），只有明确的取消意图才打断
+        3. 识别评论/感叹类输入，这类不应该打断任务
+        4. 识别附和/应答类输入，保持任务继续
+        5. 识别用户等待中的疑问，给与回应
 
         基于关键词的快速分类（同步方法，用于快速判断）
         """
@@ -133,48 +134,48 @@ class TaskManager:
 
         text = new_input.lower().strip()
 
-        # === 0. 首先检测用户在等待中的疑问 ===
-        # "有人在吗？"、"太慢了" 这类输入需要Talker回应
+        # === 0. 最高优先级：明确的取消/替换关键词 ===
+        # 必须在最前面，否则会被其他规则捕获
+        cancel_keywords = [
+            "取消", "停止", "停", "算了", "不用了", "不要了",
+            "不看了", "不做了", "换个", "重新", "不定", "不要",
+            "stop", "cancel", "never mind", "forget it",
+        ]
+        if any(kw in text for kw in cancel_keywords):
+            return UserIntent.REPLACE
+
+        # === 1. 检测用户在等待中的疑问/抱怨 ===
         waiting_questions = [
             "有人在", "在吗", "在不在", "人呢", "还在吗",
-            "慢", "太慢", "好慢", "怎么这么慢", "等好久了",
+            "太慢", "好慢", "怎么这么慢", "等好久了",
             "好了吗", "怎么样了", "完成没", "进度",
+            "没回应", "没反应", "不回应", "不反应",
         ]
         if any(q in text for q in waiting_questions):
-            # 这类是查询状态或抱怨等待，需要Talker回应
-            if any(q in text for q in ["吗", "？", "?", "在"]):
-                return UserIntent.QUERY_STATUS  # 当作查询状态处理
-            return UserIntent.COMMENT  # 其他抱怨当作评论
+            if any(q in text for q in ["吗", "？", "?", "在", "没"]):
+                return UserIntent.QUERY_STATUS
+            return UserIntent.COMMENT
 
-        # === 1. 首先检测附和/应答（最不打断） ===
+        # === 2. 检测附和/应答（不打断，但需要明确是附和）===
         backchannel_patterns = [
             "嗯", "嗯嗯", "好的", "好", "行", "可以", "对", "是",
             "ok", "okay", "yes", "right", "明白", "了解", "收到",
         ]
-        if text in backchannel_patterns or len(text) <= 2:
+        # 注意：只有明确是附和词才返回BACKCHANNEL
+        # 不再用len(text)<=2来判断，因为"取消"也是2个字
+        if text in backchannel_patterns:
             return UserIntent.BACKCHANNEL
 
-        # === 2. 检测评论/感叹（不打断任务） ===
+        # === 3. 检测评论/感叹（不打断任务） ===
         comment_patterns = [
             "不错", "很好", "太好了", "厉害", "赞", "可以啊",
             "挺好", "还行", "好的呀", "是吗", "真的吗",
             "interesting", "cool", "nice", "good", "great",
         ]
-        # 评论通常是：主语 + 评价词，如 "鸿蒙智行的车不错"
         if any(pattern in text for pattern in comment_patterns):
-            # 检查是否包含新的问题词（如果有则可能是新问题）
             question_patterns = ["吗", "？", "?", "呢", "什么", "怎么", "如何", "为什么"]
             if not any(q in text for q in question_patterns):
                 return UserIntent.COMMENT
-
-        # === 3. 明确的取消/替换关键词 ===
-        cancel_keywords = [
-            "不用了", "不要了", "算了", "取消", "停止", "停",
-            "换个", "重新", "不看了", "不做了",
-            "stop", "cancel", "never mind", "forget it",
-        ]
-        if any(kw in text for kw in cancel_keywords):
-            return UserIntent.REPLACE
 
         # === 4. 查询状态 ===
         status_keywords = [
@@ -184,15 +185,7 @@ class TaskManager:
         if any(kw in text for kw in status_keywords):
             return UserIntent.QUERY_STATUS
 
-        # === 5. 补充/修改信息的关键词 ===
-        modify_keywords = [
-            "另外", "还有", "加上", "补充", "再加", "也要",
-            "或者", "改为", "换成", "最好是", "注意",
-        ]
-        if any(kw in text for kw in modify_keywords):
-            return UserIntent.MODIFY
-
-        # === 6. 暂停/恢复关键词 ===
+        # === 5. 暂停/恢复关键词 ===
         pause_keywords = ["暂停", "等一下", "稍等", "等会", "先停", "pause"]
         if any(kw in text for kw in pause_keywords):
             return UserIntent.PAUSE
@@ -201,39 +194,41 @@ class TaskManager:
         if any(kw in text for kw in resume_keywords):
             return UserIntent.RESUME
 
-        # === 7. 回答澄清问题 ===
-        clarify_keywords = [
-            "是", "对", "好", "可以", "要", "大概", "左右",
-            "万", "块", "元", "预算",
+        # === 6. 检查是否是全新的任务请求（需要打断） ===
+        new_task_indicators = [
+            "我要", "帮我", "给我", "推荐", "分析", "比较", "查一下",
+            "选", "买", "找", "看",
         ]
-        if any(kw in text for kw in clarify_keywords) and len(text) < 30:
-            return UserIntent.CONTINUE
-
-        # === 8. 检查是否是全新的问题（需要打断） ===
-        # 新问题的特征：包含疑问词或问号
-        question_indicators = [
-            "？", "?", "吗", "呢", "什么", "怎么", "如何", "为什么",
-            "哪个", "哪些", "多少", "几", "谁", "哪",
-            "帮我", "给我", "推荐", "分析", "比较", "查一下",
-        ]
-        has_question = any(q in text for q in question_indicators)
-
-        if has_question:
+        if any(q in text for q in new_task_indicators):
             # 检查是否与当前任务相关
             current_topic = self._extract_topic(self._current_input)
             new_topic = self._extract_topic(new_input)
 
-            # 如果话题相同，可能是补充问题
-            if current_topic and new_topic and current_topic == new_topic:
-                return UserIntent.MODIFY
-
-            # 话题不同的问题，才考虑替换
-            if len(text) > 10:  # 短输入可能是误触
+            # 如果话题不同，认为是新任务
+            if current_topic and new_topic and current_topic != new_topic:
                 return UserIntent.REPLACE
 
+            # 如果包含明确的任务词
+            if len(text) > 5:
+                return UserIntent.REPLACE
+
+        # === 7. 补充/修改信息的关键词 ===
+        modify_keywords = [
+            "另外", "还有", "加上", "补充", "再加", "也要",
+            "或者", "改为", "换成", "最好是", "注意",
+        ]
+        if any(kw in text for kw in modify_keywords):
+            return UserIntent.MODIFY
+
+        # === 8. 回答澄清问题 ===
+        clarify_keywords = [
+            "是", "对", "好", "可以", "要", "大概", "左右",
+            "万", "块", "元", "预算", "北京", "上海", "广州", "深圳",
+        ]
+        if any(kw in text for kw in clarify_keywords) and len(text) < 20:
+            return UserIntent.CONTINUE
+
         # === 9. 默认：不打断任务 ===
-        # 关键改变：之前默认是REPLACE，现在默认是COMMENT
-        # 这样可以避免误打断用户的评论/感叹
         return UserIntent.COMMENT
 
     async def classify_intent_with_llm(
@@ -460,17 +455,23 @@ class TalkerThinkerApp:
 
         if intent == UserIntent.COMMENT:
             # 评论/感叹，不打断任务，但Talker应该简短回应
-            # 根据评论内容生成简短回应
             text = new_input.lower()
-            if "慢" in text:
+            if "慢" in text or "久" in text:
                 return True, "\n[Talker] 抱歉让您久等了，正在加速处理..."
             elif "在" in text and ("吗" in text or "?" in text or "？" in text):
                 return True, "\n[Talker] 在的！正在为您处理，请稍候..."
+            elif "回应" in text or "反应" in text:
+                return True, "\n[Talker] 抱歉！我在的，正在处理中..."
+            elif "乱" in text:
+                return True, "\n[Talker] 抱歉让您困惑了，如需取消请说'取消'"
             elif any(w in text for w in ["好", "不错", "行", "可以"]):
                 return True, "\n[Talker] 好的，继续处理中..."
+            elif "?" in text or "？" in text or "吗" in text or "呢" in text:
+                # 问题类评论，简短回应
+                return True, f"\n[Talker] 好问题！正在处理「{current[:20]}...」，稍后给您详细回答"
             else:
-                # 其他评论，简短确认
-                return True, None  # 静默，不打断
+                # 其他评论，简短确认或静默
+                return True, None
 
         elif intent == UserIntent.BACKCHANNEL:
             # 附和/应答，简短回应
