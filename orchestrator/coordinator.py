@@ -372,17 +372,10 @@ class Orchestrator:
         if settings.SHOW_AGENT_IDENTITY:
             yield f"[Thinker | LLM请求发送: {format_timestamp(thinker_start)}]\n"
 
-        # 进度消息队列和状态
-        progress_messages = [
-            "🔍 正在分析您的需求...",
-            "📋 正在制定执行计划...",
-            "⚙️ 正在处理中...",
-            "📊 正在整理数据...",
-            "✨ 正在优化结果...",
-        ]
-        progress_index = 0
+        # 进度播报状态
         last_progress_time = time.time()
-        progress_interval = 2.0  # 每2秒显示一次进度
+        progress_interval = 3.0  # 每3秒显示一次智能进度
+        last_progress_message = ""
 
         # 收集Thinker的输出，并跟踪首Token时间
         thinker_output = []
@@ -422,17 +415,30 @@ class Orchestrator:
                 # 没有新输出时，检查是否需要显示进度消息
                 current_time = time.time()
                 if current_time - last_progress_time >= progress_interval:
-                    if progress_index < len(progress_messages):
-                        elapsed = current_time - thinker_start
-                        yield f"\n[Talker播报] {progress_messages[progress_index]} (已耗时 {elapsed:.0f}s)"
-                        progress_index += 1
-                        last_progress_time = current_time
-                    else:
-                        # 循环显示进度
-                        progress_index = 0
-                        elapsed = current_time - thinker_start
-                        yield f"\n[Talker播报] ⏳ 仍在处理中，请稍候... (已耗时 {elapsed:.0f}s)"
-                        last_progress_time = current_time
+                    elapsed = current_time - thinker_start
+                    recent_output = "".join(thinker_output[-20:])  # 最近20个chunk
+
+                    # 使用LLM生成智能进度播报
+                    try:
+                        progress_msg = await asyncio.wait_for(
+                            self.talker.generate_progress_broadcast(
+                                original_query=user_input,
+                                recent_output=recent_output,
+                                elapsed_time=elapsed,
+                                context=context,
+                            ),
+                            timeout=2.0
+                        )
+                        # 避免重复消息
+                        if progress_msg != last_progress_message:
+                            yield f"\n[Talker播报] {progress_msg} (已耗时 {elapsed:.0f}s)"
+                            last_progress_message = progress_msg
+                    except asyncio.TimeoutError:
+                        # 超时使用简洁提示
+                        if elapsed > 30:
+                            yield f"\n[Talker播报] ⏳ 处理中... (已耗时 {elapsed:.0f}s)"
+
+                    last_progress_time = current_time
 
                 # 短暂等待，避免忙等待
                 await asyncio.sleep(0.1)

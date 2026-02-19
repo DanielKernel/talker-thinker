@@ -334,6 +334,70 @@ class TalkerAgent:
         except Exception as e:
             yield f"抱歉，处理时出现问题：{str(e)}"
 
+    async def generate_progress_broadcast(
+        self,
+        original_query: str,
+        recent_output: str,
+        elapsed_time: float,
+        context: Optional[Dict[str, Any]] = None,
+    ) -> str:
+        """
+        根据上下文生成智能进度播报
+
+        Args:
+            original_query: 用户原始问题
+            recent_output: Thinker最近的输出内容
+            elapsed_time: 已耗时（秒）
+            context: 上下文
+
+        Returns:
+            str: 进度播报消息
+        """
+        # 截取最近的输出（避免prompt过长）
+        recent_snippet = recent_output[-500:] if len(recent_output) > 500 else recent_output
+
+        prompt = f"""你是一个友好的助手，正在帮用户处理一个复杂任务。请根据当前进度，用一句话（不超过30字）向用户播报当前进度。
+
+用户问题：{original_query}
+
+已耗时：{elapsed_time:.0f}秒
+
+当前处理进度：
+{recent_snippet}
+
+要求：
+1. 根据实际处理内容描述进度，不要重复
+2. 语气自然、友好
+3. 简洁（不超过30字）
+4. 如果正在规划，说"正在规划..."
+5. 如果正在分析，说"正在分析..."
+6. 如果正在对比，说"正在对比..."
+7. 如果正在生成结果，说"正在整理结果..."
+
+只输出一句话，不要解释："""
+
+        try:
+            # 使用快速响应（低token、低温度）
+            response = await asyncio.wait_for(
+                self.llm.generate(
+                    prompt,
+                    max_tokens=50,
+                    temperature=0.3,
+                ),
+                timeout=2.0  # 2秒超时
+            )
+            return response.strip()
+        except asyncio.TimeoutError:
+            # 超时时返回基于时间的默认消息
+            if elapsed_time < 10:
+                return "正在处理中..."
+            elif elapsed_time < 30:
+                return "正在深入分析..."
+            else:
+                return "即将完成，请稍候..."
+        except Exception:
+            return f"已处理 {elapsed_time:.0f} 秒..."
+
     async def _medium_response(
         self,
         user_input: str,
