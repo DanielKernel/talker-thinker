@@ -44,14 +44,14 @@ class ProgressState:
     current_stage: ThinkerStage = ThinkerStage.IDLE
     last_stage_change: float = 0
     last_broadcast: float = 0
-    last_broadcast_msg: str = ""
+    last_broadcast_msg_template: str = ""  # 消息模板（不含时间）
     broadcast_count: int = 0
     current_step: int = 0
     total_steps: int = 0
     step_description: str = ""
-    broadcast_history: set = field(default_factory=set)  # 用于去重
-    last_content_hash: str = ""  # 用于内容去重
-    used_messages: Dict[str, set] = field(default_factory=dict)  # 按阶段记录已使用的消息
+    broadcast_history: set = field(default_factory=set)
+    last_content_hash: str = ""
+    used_message_templates: Dict[str, set] = field(default_factory=dict)  # 按阶段记录已使用的消息模板
 
 
 @dataclass
@@ -194,107 +194,113 @@ class Orchestrator:
         current_step: int = 0,
         total_steps: int = 0,
         step_desc: str = "",
-    ) -> str:
+    ) -> tuple[str, str]:
         """
-        根据阶段生成播报消息（基于上下文的动态消息）
-        关键改进：根据时间进度生成不同风格的播报，避免重复
-        使用已使用消息追踪来避免重复
+        根据阶段生成播报消息
+
+        Returns:
+            tuple: (完整消息, 消息模板)
+            消息模板用于去重，不含时间戳
         """
         # 提取主题
         topic = self._extract_topic(user_query)
         stage_key = stage.value
 
-        # 获取该阶段已使用的消息集合
-        if stage_key not in self._progress_state.used_messages:
-            self._progress_state.used_messages[stage_key] = set()
+        # 获取该阶段已使用的消息模板集合
+        if stage_key not in self._progress_state.used_message_templates:
+            self._progress_state.used_message_templates[stage_key] = set()
 
-        used = self._progress_state.used_messages[stage_key]
+        used_templates = self._progress_state.used_message_templates[stage_key]
 
         # 根据已耗时选择播报风格
-        if elapsed_time < 8:
+        if elapsed_time < 10:
             style = "initial"
-        elif elapsed_time < 15:
+        elif elapsed_time < 30:
             style = "progress"
-        elif elapsed_time < 25:
-            style = "reassure"
         else:
-            style = "urgent"
+            style = "long_wait"
 
-        def get_unused_message(msgs: list, used_set: set) -> str:
-            """从未使用的消息中选择一个，如果都用过则重置"""
-            for msg in msgs:
-                if msg not in used_set:
-                    used_set.add(msg)
-                    return msg
-            # 所有消息都用过了，清空并重新开始
-            used_set.clear()
-            used_set.add(msgs[0])
-            return msgs[0]
+        def get_unused_template(templates: list, used_set: set) -> str:
+            """从未使用的模板中选择一个"""
+            for t in templates:
+                if t not in used_set:
+                    used_set.add(t)
+                    return t
+            # 所有模板都用过了，返回默认
+            return templates[0]
 
         if stage == ThinkerStage.ANALYZING:
             if style == "initial":
-                msgs = [
-                    f"正在理解您关于「{topic}」的需求...",
-                    "正在分析问题关键点...",
-                    f"梳理「{topic}」相关信息...",
+                templates = [
+                    f"正在理解您关于「{topic}」的需求",
+                    "正在分析问题关键点",
+                    f"梳理「{topic}」相关信息",
                 ]
             elif style == "progress":
-                msgs = [
-                    "深度分析中，请稍候...",
-                    "正在提取关键要素...",
+                templates = [
+                    "深度分析中，请稍候",
+                    "正在提取关键要素",
                 ]
             else:
-                # 每次生成带时间的唯一消息，自然不会重复
-                msgs = [
-                    f"分析进行中 ({elapsed_time:.0f}s)...",
-                ]
-            return get_unused_message(msgs, used)
+                # 长时间等待，显示已用时间
+                templates = ["分析进行中"]  # 不含时间，时间单独显示
+
+            template = get_unused_template(templates, used_templates)
+            # 如果是"分析进行中"，加上时间
+            if template == "分析进行中":
+                return f"{template} ({elapsed_time:.0f}s)...", template
+            return f"{template}...", template
 
         elif stage == ThinkerStage.PLANNING:
             if style == "initial":
-                msgs = [
-                    f"已理解需求，正在制定{topic}方案...",
-                    "规划最优解决路径...",
+                templates = [
+                    f"已理解需求，正在制定{topic}方案",
+                    "规划最优解决路径",
                 ]
             elif style == "progress":
-                msgs = [
-                    "方案设计中...",
-                    "正在分解任务步骤...",
+                templates = [
+                    "方案设计中",
+                    "正在分解任务步骤",
                 ]
             else:
-                msgs = [
-                    f"规划中 ({elapsed_time:.0f}s)...",
-                ]
-            return get_unused_message(msgs, used)
+                templates = ["规划中"]
+
+            template = get_unused_template(templates, used_templates)
+            return f"{template}...", template
 
         elif stage == ThinkerStage.EXECUTING:
             if total_steps > 0 and current_step > 0:
                 progress_pct = int((current_step / total_steps) * 100)
                 if step_desc:
                     short_desc = step_desc[:15] + "..." if len(step_desc) > 15 else step_desc
-                    return f"第{current_step}/{total_steps}步: {short_desc} ({progress_pct}%)"
-                return f"执行中: {current_step}/{total_steps} 步 ({progress_pct}%)"
-            # 没有步骤信息时使用通用消息
-            msgs = [
-                "正在处理核心任务...",
-                "执行关键步骤...",
+                    msg = f"第{current_step}/{total_steps}步: {short_desc} ({progress_pct}%)"
+                    template = f"第{current_step}/{total_steps}步"
+                    return msg, template
+                msg = f"执行中: {current_step}/{total_steps} 步 ({progress_pct}%)"
+                template = f"第{current_step}/{total_steps}步"
+                return msg, template
+            templates = [
+                "正在处理核心任务",
+                "执行关键步骤",
             ]
-            return get_unused_message(msgs, used)
+            template = get_unused_template(templates, used_templates)
+            return f"{template}...", template
 
         elif stage == ThinkerStage.SYNTHESIZING:
-            msgs = [
-                "正在整合分析结果...",
-                "生成最终答案中...",
-                "即将完成，请稍候...",
-                "整理输出内容...",
+            templates = [
+                "正在整合分析结果",
+                "生成最终答案中",
+                "即将完成，请稍候",
+                "整理输出内容",
             ]
-            return get_unused_message(msgs, used)
+            template = get_unused_template(templates, used_templates)
+            return f"{template}...", template
 
         elif stage == ThinkerStage.COMPLETED:
-            return "处理完成！"
+            return "处理完成！", "处理完成"
 
         # 默认消息
-        return f"处理中 ({elapsed_time:.0f}s)..."
+        return f"处理中 ({elapsed_time:.0f}s)...", "处理中"
 
     def _extract_topic(self, query: str) -> str:
         """从用户问题中提取主题"""
@@ -341,26 +347,6 @@ class Orchestrator:
         state = self._progress_state
         current_time = time.time()
 
-        # 动态计算播报间隔：初始适中，后期延长
-        def get_min_interval(elapsed: float, stage: ThinkerStage) -> float:
-            """根据耗时和阶段动态计算最小间隔"""
-            # 更保守的间隔策略
-            if elapsed < 10:
-                base_interval = 4.0  # 初始4秒
-            elif elapsed < 20:
-                base_interval = 5.0  # 中期5秒
-            elif elapsed < 40:
-                base_interval = 6.0  # 后期6秒
-            else:
-                base_interval = 8.0  # 长时间任务8秒
-
-            # 规划阶段可能需要更长时间，稍微延长间隔
-            if stage == ThinkerStage.PLANNING:
-                base_interval = min(base_interval + 1.0, 10.0)
-            return base_interval
-
-        min_interval = get_min_interval(elapsed_time, new_stage)
-
         # 阶段变化，立即播报
         if new_stage != state.current_stage:
             return True, "stage_changed"
@@ -369,18 +355,15 @@ class Orchestrator:
         if new_stage == ThinkerStage.EXECUTING and current_step != state.current_step and current_step > 0:
             return True, "step_changed"
 
-        # 同阶段内，检查时间间隔
-        time_since_last = current_time - state.last_broadcast
-        if time_since_last >= min_interval:
-            # 限制每阶段的播报次数
-            stage_key = new_stage.value
-            stage_broadcast_count = len(state.used_messages.get(stage_key, set()))
-            max_broadcasts_per_stage = 5  # 每阶段最多5条不同消息
+        # 检查该阶段已使用的模板数量
+        stage_key = new_stage.value
+        template_count = len(state.used_message_templates.get(stage_key, set()))
+        max_templates_per_stage = 4  # 每阶段最多4条不同消息
 
-            if stage_broadcast_count < max_broadcasts_per_stage:
-                return True, "interval_elapsed"
+        if template_count >= max_templates_per_stage:
+            return False, "max_templates_reached"
 
-        return False, "skip"
+        return True, "interval_elapsed"
 
     def _hash_broadcast_content(self, stage: ThinkerStage, step: int, elapsed: float) -> str:
         """生成播报内容的哈希值，用于去重"""
@@ -590,54 +573,58 @@ class Orchestrator:
         first_timestamp_shown = False
         last_broadcast_time = llm_request_time
         broadcast_count = 0
-        used_broadcast_msgs = set()  # 追踪已使用的消息
+        used_broadcast_templates = set()  # 追踪已使用的消息模板
 
         def get_talker_broadcast_interval(elapsed: float) -> float:
-            """动态计算播报间隔"""
-            if elapsed < 10:
-                return 4.0  # 初始4秒
-            elif elapsed < 20:
-                return 5.0  # 中期5秒
+            """动态计算播报间隔 - 更保守"""
+            if elapsed < 15:
+                return 6.0  # 初始6秒
+            elif elapsed < 30:
+                return 8.0  # 中期8秒
             else:
-                return 6.0  # 后期6秒
+                return 10.0  # 后期10秒
 
         while not talker_complete or not talker_queue.empty():
             current_time = time.time()
             elapsed = current_time - llm_request_time
 
-            # === 关键改进：每次循环都检查是否需要播报 ===
+            # === 播报检查 ===
             broadcast_interval = get_talker_broadcast_interval(elapsed)
             if current_time - last_broadcast_time >= broadcast_interval:
                 ts = format_timestamp(current_time)
 
-                # 根据时间动态选择播报内容，避免重复
-                if elapsed < 10:
-                    all_msgs = ["正在处理...", "思考中..."]
-                elif elapsed < 20:
-                    all_msgs = ["仍在处理中...", "请稍候..."]
+                # 根据时间选择播报模板
+                if elapsed < 15:
+                    templates = ["正在处理", "思考中"]
+                elif elapsed < 30:
+                    templates = ["仍在处理中", "请稍候"]
                 else:
-                    # 长时间任务，带时间提示
-                    all_msgs = [f"响应较慢 ({elapsed:.0f}s)..."]
+                    templates = ["响应较慢"]  # 模板不含时间
 
-                # 选择一个未使用的消息
-                msg = None
-                for m in all_msgs:
-                    if m not in used_broadcast_msgs:
-                        msg = m
-                        used_broadcast_msgs.add(m)
+                # 选择未使用的模板
+                template = None
+                for t in templates:
+                    if t not in used_broadcast_templates:
+                        template = t
+                        used_broadcast_templates.add(t)
                         break
 
-                if msg is None:
-                    # 所有消息都用过了，清空重来（但这不应该频繁发生）
-                    used_broadcast_msgs.clear()
-                    msg = all_msgs[0]
+                if template is None:
+                    # 所有模板都用过了，用默认
+                    template = "处理中"
+
+                # 生成完整消息
+                if template == "响应较慢":
+                    msg = f"{template} ({elapsed:.0f}s)..."
+                else:
+                    msg = f"{template}..."
 
                 yield f"\n[{ts}] Talker: {msg}"
                 last_broadcast_time = current_time
                 broadcast_count += 1
 
                 # 限制最大播报次数
-                if broadcast_count >= 8:
+                if broadcast_count >= 5:
                     break
 
             # 尝试获取输出
@@ -812,14 +799,13 @@ class Orchestrator:
         last_broadcast_time = thinker_start
 
         def get_broadcast_interval(elapsed: float) -> float:
-            """根据已耗时动态计算播报间隔"""
-            # 初始阶段更频繁（2-3秒），后期稳定在3-4秒
-            if elapsed < 10:
-                return 2.5  # 初始2.5秒
-            elif elapsed < 20:
-                return 3.0  # 中期3秒
+            """根据已耗时动态计算播报间隔 - 更保守"""
+            if elapsed < 15:
+                return 6.0  # 初始6秒
+            elif elapsed < 30:
+                return 8.0  # 中期8秒
             else:
-                return 4.0  # 后期4秒（上限）
+                return 10.0  # 后期10秒
         output_index = 0
 
         async def run_thinker():
@@ -837,8 +823,7 @@ class Orchestrator:
             current_time = time.time()
             elapsed = current_time - thinker_start
 
-            # === 关键改进：每次循环都检查是否需要播报 ===
-            # 使用动态间隔：初始频繁，后期稳定
+            # === 播报检查 ===
             broadcast_interval = get_broadcast_interval(elapsed)
             if current_time - last_broadcast_time >= broadcast_interval:
                 # 解析当前阶段（基于已有输出）
@@ -848,33 +833,32 @@ class Orchestrator:
                 should_broadcast, reason = self._should_broadcast(new_stage, current_step, elapsed)
 
                 if should_broadcast:
-                    # 使用内容哈希去重
-                    content_hash = self._hash_broadcast_content(new_stage, current_step, elapsed)
-                    if content_hash not in self._progress_state.broadcast_history:
-                        broadcast_msg = self._generate_stage_broadcast(
-                            stage=new_stage,
-                            user_query=user_input,
-                            elapsed_time=elapsed,
-                            current_step=current_step,
-                            total_steps=total_steps,
-                            step_desc=step_desc,
-                        )
+                    # 生成播报消息和模板
+                    broadcast_msg, msg_template = self._generate_stage_broadcast(
+                        stage=new_stage,
+                        user_query=user_input,
+                        elapsed_time=elapsed,
+                        current_step=current_step,
+                        total_steps=total_steps,
+                        step_desc=step_desc,
+                    )
 
-                        # 额外检查：确保消息不重复
-                        if broadcast_msg != self._progress_state.last_broadcast_msg:
-                            ts = format_timestamp(current_time)
-                            yield f"\n[{ts}] Talker: {broadcast_msg}"
-                            self._progress_state.last_broadcast = current_time
-                            self._progress_state.last_broadcast_msg = broadcast_msg
-                            self._progress_state.broadcast_count += 1
-                            self._progress_state.broadcast_history.add(content_hash)
+                    # 基于模板去重（不是完整消息）
+                    if msg_template != self._progress_state.last_broadcast_msg_template:
+                        ts = format_timestamp(current_time)
+                        yield f"\n[{ts}] Talker: {broadcast_msg}"
+                        self._progress_state.last_broadcast = current_time
+                        self._progress_state.last_broadcast_msg_template = msg_template
+                        self._progress_state.broadcast_count += 1
 
-                        # 更新状态
-                        if new_stage != self._progress_state.current_stage:
-                            self._progress_state.current_stage = new_stage
-                            self._progress_state.last_stage_change = current_time
-                        self._progress_state.current_step = current_step
-                        self._progress_state.total_steps = total_steps
+                    # 更新状态
+                    if new_stage != self._progress_state.current_stage:
+                        self._progress_state.current_stage = new_stage
+                        self._progress_state.last_stage_change = current_time
+                        # 阶段变化时重置模板集合
+                        self._progress_state.used_message_templates = {}
+                    self._progress_state.current_step = current_step
+                    self._progress_state.total_steps = total_steps
 
                 last_broadcast_time = current_time
 
