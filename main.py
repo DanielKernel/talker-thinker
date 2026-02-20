@@ -258,7 +258,7 @@ class TaskManager:
 
         action_keywords = [
             "买", "选", "推荐", "分析", "比较", "查", "找", "看", "订", "定",
-            "吃", "点", "安排", "规划", "预订", "打车", "叫车", "叫个",
+            "吃", "安排", "规划", "预订", "打车", "叫车", "叫个",
         ]
 
         has_action = any(kw in text for kw in action_keywords)

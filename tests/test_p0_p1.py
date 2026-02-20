@@ -46,6 +46,17 @@ class TestP0IntentHandling:
 
         await app.task_manager.cancel_current_task()
 
+    @pytest.mark.asyncio
+    async def test_slow_comment_should_not_cancel(self):
+        manager = TaskManager()
+        task = asyncio.create_task(asyncio.sleep(60))
+        manager.start_task(task, "详细对比滴滴和高德打车")
+
+        intent = manager.classify_intent("有点慢")
+        assert intent in (UserIntent.COMMENT, UserIntent.QUERY_STATUS)
+
+        await manager.cancel_current_task()
+
 
 class TestP1SharedContextFlow:
     def _create_orchestrator(self) -> Orchestrator:

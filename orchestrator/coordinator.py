@@ -766,6 +766,8 @@ class Orchestrator:
         if settings.SHOW_AGENT_IDENTITY:
             timestamp = format_timestamp(thinker_start)
             yield f"\n[{timestamp}] Talker: 好的，这个问题需要深度思考，已转交给Thinker处理"
+            precheck_ts = format_timestamp(time.time())
+            yield f"\n[{precheck_ts}] Talker: 正在同步上下文并规划步骤，请稍候..."
 
         # === 澄清机制：检测是否需要澄清 ===
         try:
