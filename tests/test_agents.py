@@ -98,7 +98,7 @@ class TestOrchestrator:
             chunks.append(chunk)
 
         assert len(chunks) > 0
-        session = orchestrator.get_session(session_id)
+        session = await orchestrator.get_session(session_id)
         assert session is not None
         assert len(session["messages"]) >= 1
 
@@ -121,6 +121,6 @@ class TestOrchestrator:
         async for _ in orchestrator.process("测试", session_id=session_id):
             pass
 
-        assert orchestrator.get_session(session_id) is not None
-        orchestrator.clear_session(session_id)
-        assert orchestrator.get_session(session_id) is None
+        assert await orchestrator.get_session(session_id) is not None
+        await orchestrator.clear_session(session_id)
+        assert await orchestrator.get_session(session_id) is None

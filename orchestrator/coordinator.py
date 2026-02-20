@@ -186,6 +186,18 @@ class Orchestrator:
 
         return stage, current_step, total_steps, step_desc
 
+    def _stage_from_shared_progress(self, stage_name: str) -> ThinkerStage:
+        """将SharedContext中的阶段名映射为ThinkerStage。"""
+        mapping = {
+            "idle": ThinkerStage.IDLE,
+            "analyzing": ThinkerStage.ANALYZING,
+            "planning": ThinkerStage.PLANNING,
+            "executing": ThinkerStage.EXECUTING,
+            "synthesizing": ThinkerStage.SYNTHESIZING,
+            "completed": ThinkerStage.COMPLETED,
+        }
+        return mapping.get((stage_name or "").lower(), ThinkerStage.IDLE)
+
     def _generate_stage_broadcast(
         self,
         stage: ThinkerStage,
@@ -423,8 +435,13 @@ class Orchestrator:
         await self.session_context.add_message(session_id, user_message)
 
         # 创建/获取共享上下文
-        shared = self._get_or_create_shared_context(session_id, user_input)
+        shared = self._get_or_create_shared_context(session_id)
+        if not shared.needs_clarification():
+            shared.user_input = user_input
+            shared.clarified_intent = user_input
         shared.is_processing = True
+
+        effective_input = user_input
 
         # === 检查是否是回答澄清问题 ===
         if shared.needs_clarification():
@@ -435,11 +452,13 @@ class Orchestrator:
                 shared.answer_clarification(user_input)
                 # 更新意图
                 shared.update_intent_with_clarification(user_input)
+                effective_input = shared.clarified_intent or shared.user_input or user_input
 
                 # 给用户确认反馈
                 ts = time.strftime("%H:%M:%S", time.localtime())
                 ms = int((time.time() % 1) * 1000)
                 yield f"\n[{ts}.{ms:03d}] Talker: 收到，已更新您的需求信息"
+                shared.add_talker_interaction("收到，已更新您的需求信息", "clarification")
 
                 # 标记为继续处理，但使用更新后的意图
                 # 如果澄清后的意图足够简单，可以让Talker处理
@@ -463,6 +482,7 @@ class Orchestrator:
             "received_time": received_time,
             "shared": shared,  # 添加共享上下文
             "session_summary": session_summary,  # 添加会话摘要
+            "effective_input": effective_input,
         }
 
         # 收集助手响应用于保存到会话
@@ -470,14 +490,14 @@ class Orchestrator:
 
         try:
             # 使用Talker进行意图分类
-            classification = await self.talker.classify_intent(user_input, full_context)
+            classification = await self.talker.classify_intent(effective_input, full_context)
 
             # 根据复杂度选择处理策略
             if classification.complexity == TaskComplexity.COMPLEX:
                 # 复杂任务：使用协作模式
                 self._stats["thinker_handled"] += 1
                 async for chunk in self._collaboration_handoff(
-                    user_input, full_context, received_time=received_time
+                    effective_input, full_context, received_time=received_time
                 ):
                     assistant_response_chunks.append(chunk)
                     yield chunk
@@ -485,7 +505,7 @@ class Orchestrator:
                 # 简单/中等任务：Talker处理
                 self._stats["talker_handled"] += 1
                 async for chunk in self._delegation_handoff(
-                    user_input, full_context, classification, received_time=received_time
+                    effective_input, full_context, classification, received_time=received_time
                 ):
                     assistant_response_chunks.append(chunk)
                     yield chunk
@@ -764,6 +784,7 @@ class Orchestrator:
                 # 通过Talker向用户提问
                 ts = format_timestamp(time.time())
                 yield f"\n[{ts}] Talker: {question}"
+                shared.add_talker_interaction(question, "clarification")
 
                 # 记录澄清请求
                 shared.add_clarification_request(question, reason or "", [])
@@ -772,6 +793,9 @@ class Orchestrator:
                 # 注意：这里使用简化的方式，实际回答会在下一次process中处理
                 # 将澄清状态保存到共享上下文供下次使用
                 shared.clarification_status = ClarificationStatus.PENDING
+
+                # 本轮暂停处理，等待用户在下一轮回答澄清问题
+                return
 
         except Exception:
             # 澄清检测失败，继续正常处理
@@ -826,8 +850,14 @@ class Orchestrator:
             # === 播报检查 ===
             broadcast_interval = get_broadcast_interval(elapsed)
             if current_time - last_broadcast_time >= broadcast_interval:
-                # 解析当前阶段（基于已有输出）
-                new_stage, current_step, total_steps, step_desc = self._parse_thinker_stage(accumulated_output)
+                # 优先使用SharedContext中的实时进度，回退到输出解析
+                if shared and shared.thinker_progress.current_stage != "idle":
+                    new_stage = self._stage_from_shared_progress(shared.thinker_progress.current_stage)
+                    current_step = shared.thinker_progress.current_step
+                    total_steps = shared.thinker_progress.total_steps
+                    step_desc = ""
+                else:
+                    new_stage, current_step, total_steps, step_desc = self._parse_thinker_stage(accumulated_output)
 
                 # 检查是否需要播报
                 should_broadcast, reason = self._should_broadcast(new_stage, current_step, elapsed)
@@ -847,6 +877,8 @@ class Orchestrator:
                     if msg_template != self._progress_state.last_broadcast_msg_template:
                         ts = format_timestamp(current_time)
                         yield f"\n[{ts}] Talker: {broadcast_msg}"
+                        if shared:
+                            shared.add_talker_interaction(broadcast_msg, "broadcast")
                         self._progress_state.last_broadcast = current_time
                         self._progress_state.last_broadcast_msg_template = msg_template
                         self._progress_state.broadcast_count += 1
@@ -869,7 +901,13 @@ class Orchestrator:
                 accumulated_output += chunk
 
                 # 解析阶段（用于状态更新）
-                new_stage, current_step, total_steps, step_desc = self._parse_thinker_stage(accumulated_output)
+                if shared and shared.thinker_progress.current_stage != "idle":
+                    new_stage = self._stage_from_shared_progress(shared.thinker_progress.current_stage)
+                    current_step = shared.thinker_progress.current_step
+                    total_steps = shared.thinker_progress.total_steps
+                    step_desc = ""
+                else:
+                    new_stage, current_step, total_steps, step_desc = self._parse_thinker_stage(accumulated_output)
 
                 # 更新状态
                 if new_stage != self._progress_state.current_stage:

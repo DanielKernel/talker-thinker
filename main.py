@@ -41,6 +41,7 @@ class TaskManager:
         self._pause_event: Optional[asyncio.Event] = None
         self._task_context: Optional[dict] = None  # 保存暂停时的上下文
         self._task_start_time: float = 0  # 任务开始时间
+        self._current_topic: Optional[str] = None
 
     @property
     def is_processing(self) -> bool:
@@ -68,6 +69,7 @@ class TaskManager:
         self._pause_event = asyncio.Event()
         self._pause_event.set()  # 初始状态：不暂停
         self._task_start_time = time.time()  # 记录开始时间
+        self._current_topic = self._extract_topic(user_input)
 
     def end_task(self):
         """结束当前任务"""
@@ -76,6 +78,7 @@ class TaskManager:
         self._is_processing = False
         self._paused = False
         self._task_context = None
+        self._current_topic = None
 
     async def pause_current_task(self) -> bool:
         """暂停当前任务"""
@@ -134,15 +137,27 @@ class TaskManager:
 
         text = new_input.lower().strip()
 
+        if not text:
+            return UserIntent.BACKCHANNEL
+
         # === 0. 最高优先级：明确的取消/替换关键词 ===
         # 必须在最前面，否则会被其他规则捕获
         cancel_keywords = [
             "取消", "停止", "停", "算了", "不用了", "不要了",
-            "不看了", "不做了", "换个", "重新", "不定", "不要",
+            "不看了", "不做了", "换个", "重新", "不定", "不买了",
+            "不买", "不需要了", "先不用", "先不", "不用买",
             "stop", "cancel", "never mind", "forget it",
         ]
         if any(kw in text for kw in cancel_keywords):
             return UserIntent.REPLACE
+
+        # === 0.1 显式新任务（高优先级）===
+        explicit_new_task_phrases = [
+            "我要", "我想", "帮我", "给我", "麻烦", "请你", "请帮", "重新帮我",
+        ]
+        if any(phrase in text for phrase in explicit_new_task_phrases):
+            if self._is_likely_new_task(text):
+                return UserIntent.REPLACE
 
         # === 1. 检测用户在等待中的疑问/抱怨 ===
         waiting_questions = [
@@ -150,6 +165,7 @@ class TaskManager:
             "太慢", "好慢", "怎么这么慢", "等好久了",
             "好了吗", "怎么样了", "完成没", "进度",
             "没回应", "没反应", "不回应", "不反应",
+            "你在干啥", "你在干嘛", "分析啥", "在做什么",
         ]
         if any(q in text for q in waiting_questions):
             if any(q in text for q in ["吗", "？", "?", "在", "没"]):
@@ -165,6 +181,10 @@ class TaskManager:
         # 不再用len(text)<=2来判断，因为"取消"也是2个字
         if text in backchannel_patterns:
             return UserIntent.BACKCHANNEL
+
+        # === 2.1 短文本新任务检测（避免“吃饭”被误判）===
+        if len(text) <= 4 and self._is_likely_new_task(text):
+            return UserIntent.REPLACE
 
         # === 3. 检测评论/感叹（不打断任务） ===
         comment_patterns = [
@@ -197,11 +217,11 @@ class TaskManager:
         # === 6. 检查是否是全新的任务请求（需要打断） ===
         new_task_indicators = [
             "我要", "帮我", "给我", "推荐", "分析", "比较", "查一下",
-            "选", "买", "找", "看",
+            "选", "买", "找", "看", "订", "定", "吃", "点餐",
         ]
         if any(q in text for q in new_task_indicators):
             # 检查是否与当前任务相关
-            current_topic = self._extract_topic(self._current_input)
+            current_topic = self._current_topic or self._extract_topic(self._current_input)
             new_topic = self._extract_topic(new_input)
 
             # 如果话题不同，认为是新任务
@@ -230,6 +250,29 @@ class TaskManager:
 
         # === 9. 默认：不打断任务 ===
         return UserIntent.COMMENT
+
+    def _is_likely_new_task(self, text: str) -> bool:
+        """判断输入是否更像新任务而不是附和/评论。"""
+        current_topic = self._current_topic or self._extract_topic(self._current_input or "")
+        new_topic = self._extract_topic(text)
+
+        action_keywords = [
+            "买", "选", "推荐", "分析", "比较", "查", "找", "看", "订", "定",
+            "吃", "点", "安排", "规划", "预订", "打车", "叫车", "叫个",
+        ]
+
+        has_action = any(kw in text for kw in action_keywords)
+
+        if current_topic and new_topic and current_topic != new_topic and (has_action or len(text) <= 6):
+            return True
+
+        if current_topic and not new_topic and has_action and len(text) <= 4:
+            return True
+
+        if not current_topic and has_action:
+            return True
+
+        return False
 
     async def classify_intent_with_llm(
         self,
@@ -307,9 +350,10 @@ class TaskManager:
     def _extract_topic(self, text: str) -> Optional[str]:
         """提取话题关键词"""
         topic_keywords = {
+            "选车": ["车", "汽车", "买车", "选车", "suv", "轿车", "新能源车"],
             "打车": ["打车", "滴滴", "高德", " taxi", "专车", "快车"],
             "咖啡": ["咖啡", "拿铁", "星巴克", "瑞幸"],
-            "美食": ["餐厅", "美食", "吃的", "推荐菜"],
+            "美食": ["餐厅", "美食", "吃的", "推荐菜", "吃饭", "吃"],
             "购物": ["买", "购物", "价格", "便宜"],
             "旅游": ["旅游", "景点", "酒店", "机票"],
         }
@@ -462,6 +506,8 @@ class TalkerThinkerApp:
                 return True, "\n[Talker] 在的！正在为您处理，请稍候..."
             elif "回应" in text or "反应" in text:
                 return True, "\n[Talker] 抱歉！我在的，正在处理中..."
+            elif "干啥" in text or "干嘛" in text or "分析啥" in text or "做什么" in text:
+                return True, f"\n[Talker] 正在分析「{current[:24]}...」，马上给您结果"
             elif "乱" in text:
                 return True, "\n[Talker] 抱歉让您困惑了，如需取消请说'取消'"
             elif any(w in text for w in ["好", "不错", "行", "可以"]):
