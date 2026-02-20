@@ -77,3 +77,54 @@
 - `test_status_phrase_should_be_query_status`
 - `test_extract_replacement_input`
 - `test_idle_stage_broadcast_template`
+
+## 2026-02-20 会话C：记忆缺失与打断决策异常
+
+### 原始片段（节选）
+```
+用户: 我的口味知道吗？
+Talker: 不了解您的口味偏好...
+
+用户: thinker没说话啊 / 完全没有播报进度 / 给我一些进度信息
+Talker: 仅偶发状态回复，无稳定周期播报
+
+用户: 吃饭的app
+系统: 任务被打断并取消
+```
+
+### 问题判定
+1. **跨会话记忆缺失**：已表达“喜欢吃辣”在新会话不可用。  
+2. **Talker定期播报不稳定**：存在状态追问后才回，缺少固定心跳播报。  
+3. **Thinker可见性低**：用户持续感知“Thinker没反应”。  
+4. **打断治理不清晰**：补充信息“吃饭的app”被误走取消路径。
+
+### 控制链路（当前实现）
+1. **谁控制打断**：`main.py / TalkerThinkerApp.run_interactive` 在任务进行时接收新输入并调用 `_handle_new_input_during_processing`。  
+2. **谁决策取消**：`TaskManager.classify_intent` 返回 `REPLACE` 后，`_handle_new_input_during_processing` 调用 `cancel_current_task()`。  
+3. **为何会误取消**：当前规则对“短文本+话题词”仍可能偏向 `REPLACE`，复合语义（补充 vs 新任务）缺少二次确认与置信度门控。
+
+### 重新规划的优化措施（vNext）
+1. **跨会话记忆层（P0）**  
+   - 新增用户偏好持久层（口味、预算、品牌偏好）并在新会话开场注入。  
+   - 记忆写入触发：`MODIFY/澄清回答/显式偏好表达`。  
+   - 记忆读取触发：问偏好、推荐类任务、餐饮/购车等垂域任务。
+
+2. **播报可靠性层（P0）**  
+   - 增加硬性心跳播报（例如每5-7秒）与“最后播报超时告警”。  
+   - 播报降级策略：即使无新阶段，也要输出“仍在处理 + 当前阶段”。  
+   - 对“用户催促后无播报”建立回归用例和指标。
+
+3. **Thinker可见性层（P0）**  
+   - 强制首反馈 SLA（转交后2秒内必须出现 Thinker/Talker阶段反馈）。  
+   - 将 Thinker 阶段、步骤、最新中间结果结构化写入 SharedContext 并统一由 Talker播报。  
+   - 针对澄清等待态，明确“等待你补充信息”状态提示，避免“无响应”感知。
+
+4. **打断决策治理层（P0）**  
+   - 引入三分决策：`CANCEL_ONLY / MODIFY_CURRENT / REPLACE_WITH_NEW_TASK`。  
+   - 对 `REPLACE_WITH_NEW_TASK` 增加“新任务片段提取置信度”，低置信度时先追问确认。  
+   - 对“吃饭的app”这类短补充默认归 `MODIFY_CURRENT`，除非包含明确取消/新任务触发词。
+
+### 后续回归重点
+- 跨会话口味记忆召回：新会话问“我的口味知道吗”应返回已知偏好。  
+- 心跳播报稳定性：无用户追问时也应有周期播报。  
+- 打断准确性：`吃饭的app` 不取消，`不想查了，改查餐馆` 应切换新任务。
