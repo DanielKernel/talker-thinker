@@ -272,6 +272,38 @@ class ThinkerAgent:
                 steps=[{"name": "分析问题", "description": user_input}],
             )
 
+    def _format_user_preferences(self, context: Optional[Dict[str, Any]] = None) -> str:
+        """格式化用户偏好信息用于提示词注入。"""
+        if not context:
+            return ""
+        prefs = context.get("user_preferences") or {}
+        if not prefs:
+            return ""
+        pref_lines = [f"- {k}: {v}" for k, v in prefs.items()]
+        return "\n已知用户偏好/约束：\n" + "\n".join(pref_lines) + "\n"
+
+    def _filter_missing_info_by_preferences(
+        self,
+        missing_info: List[str],
+        context: Optional[Dict[str, Any]] = None,
+    ) -> List[str]:
+        """若缺失信息已被用户偏好覆盖，则不再追问。"""
+        prefs = (context or {}).get("user_preferences") or {}
+        if not prefs:
+            return missing_info
+
+        def covered(item: str) -> bool:
+            x = (item or "").lower()
+            if any(k in x for k in ["预算", "价格", "花费", "金额"]):
+                return "budget" in prefs
+            if any(k in x for k in ["口味", "饮食", "忌口", "偏好"]):
+                return any(k in prefs for k in ["taste", "likes", "dislikes"])
+            if any(k in x for k in ["车型", "车", "suv", "轿车"]):
+                return "car_type" in prefs
+            return False
+
+        return [m for m in missing_info if not covered(m)]
+
     def _build_planning_prompt(
         self,
         user_input: str,
@@ -283,11 +315,13 @@ class ThinkerAgent:
             skills = self._skill_invoker.engine.list_skill_names()
             if skills:
                 skills_info = f"\n可用技能: {', '.join(skills)}"
+        pref_info = self._format_user_preferences(context)
 
         return f"""作为一个任务规划专家，请分析以下用户请求并制定执行计划：
 
 用户请求：{user_input}
 {skills_info}
+{pref_info}
 
 请输出JSON格式的计划：
 {{
@@ -628,6 +662,7 @@ class ThinkerAgent:
         Returns:
             tuple: (是否需要澄清, 澄清原因, 缺失的信息列表)
         """
+        pref_info = self._format_user_preferences(context)
         prompt = f"""分析以下用户请求，判断是否需要进一步澄清：
 
 用户请求：{user_input}
@@ -635,6 +670,7 @@ class ThinkerAgent:
 任务意图：{plan.intent}
 
 约束条件：{', '.join(plan.constraints) if plan.constraints else '无'}
+{pref_info}
 
 请判断：
 1. 用户请求是否有歧义？
@@ -665,7 +701,12 @@ class ThinkerAgent:
                 data = json.loads(response[json_start:json_end])
                 needs = data.get("needs_clarification", False)
                 reason = data.get("reason", "")
-                missing = data.get("missing_info", [])
+                missing = self._filter_missing_info_by_preferences(
+                    data.get("missing_info", []),
+                    context,
+                )
+                if needs and not missing:
+                    return False, None, []
                 return needs, reason, missing
         except Exception:
             pass
@@ -690,10 +731,12 @@ class ThinkerAgent:
             str: 澄清问题
         """
         missing_str = "、".join(missing_info) if missing_info else "一些信息"
+        pref_info = self._format_user_preferences(context)
 
         prompt = f"""用户提出了以下请求：{user_input}
 
 为了更好地帮助用户，需要了解更多关于「{missing_str}」的信息。
+{pref_info}
 
 请生成一个友好、简洁的澄清问题（不超过50字），询问用户缺失的信息。
 

@@ -246,6 +246,20 @@ Talker持续播报“仍在分析/核对条件/即将推理...”
 - `test_extract_user_preferences_generic_model`
 - `test_merge_user_preferences_list_dedup`
 
+## 2026-02-20 会话I：记忆建模与澄清协同
+
+### 问题
+即使已有偏好记忆，澄清阶段仍可能重复追问（如预算已知还问预算）。
+
+### 本轮优化
+1. Thinker 规划提示词注入通用偏好槽位（`user_preferences`）。  
+2. 澄清判定增加“已知偏好覆盖过滤”：若缺失项已被记忆命中，则不再追问。  
+3. 澄清问题生成也注入偏好上下文，减少与历史偏好冲突。
+
+### 新增测试
+- `test_planning_prompt_includes_preferences`
+- `test_needs_clarification_respects_preferences`
+
 ## 2026-02-20 历史交互综合复盘（问题分类 + 优化方向 + 优先级）
 
 ### 一、核心问题分类（5大类）

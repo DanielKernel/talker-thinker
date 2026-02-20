@@ -250,3 +250,21 @@ class TestP1SharedContextFlow:
         merged = "".join(chunks)
         assert "预分析耗时较长" in merged
         assert "Thinker: 开始处理" in merged
+
+    @pytest.mark.asyncio
+    async def test_needs_clarification_respects_preferences(self):
+        orchestrator = self._create_orchestrator()
+        thinker = orchestrator.thinker
+        plan = type("Plan", (), {"intent": "推荐车型", "constraints": []})()
+
+        async def mock_generate(*args, **kwargs):
+            return '{"needs_clarification": true, "reason": "缺少预算", "missing_info": ["预算"]}'
+
+        thinker.llm.generate = mock_generate
+        needs, reason, missing = await thinker.needs_clarification(
+            "帮我推荐车",
+            plan,
+            context={"user_preferences": {"budget": "20万"}},
+        )
+        assert needs is False
+        assert missing == []

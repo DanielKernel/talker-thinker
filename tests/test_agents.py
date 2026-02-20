@@ -84,6 +84,14 @@ class TestThinkerAgent:
         assert "total_tasks" in stats
         assert "success_rate" in stats
 
+    def test_planning_prompt_includes_preferences(self, thinker_agent):
+        prompt = thinker_agent._build_planning_prompt(
+            "推荐一个方案",
+            context={"user_preferences": {"likes": ["安静"], "budget": "20万"}},
+        )
+        assert "已知用户偏好/约束" in prompt
+        assert "budget" in prompt
+
 
 class TestOrchestrator:
     """Orchestrator测试类"""
