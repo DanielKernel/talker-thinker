@@ -198,6 +198,16 @@ class Orchestrator:
         }
         return mapping.get((stage_name or "").lower(), ThinkerStage.IDLE)
 
+    def _latest_shared_step_desc(self, shared: Optional[SharedContext]) -> str:
+        """从SharedContext提取最近的Thinker阶段说明。"""
+        if not shared:
+            return ""
+        partials = shared.thinker_progress.partial_results
+        if not partials:
+            return ""
+        desc = (partials[-1] or "").strip()
+        return desc[:30]
+
     def _generate_stage_broadcast(
         self,
         stage: ThinkerStage,
@@ -598,11 +608,11 @@ class Orchestrator:
         def get_talker_broadcast_interval(elapsed: float) -> float:
             """动态计算播报间隔 - 更保守"""
             if elapsed < 15:
-                return 6.0  # 初始6秒
+                return 4.0  # 初始4秒
             elif elapsed < 30:
-                return 8.0  # 中期8秒
+                return 6.0  # 中期6秒
             else:
-                return 10.0  # 后期10秒
+                return 8.0  # 后期8秒
 
         while not talker_complete or not talker_queue.empty():
             current_time = time.time()
@@ -827,11 +837,11 @@ class Orchestrator:
         def get_broadcast_interval(elapsed: float) -> float:
             """根据已耗时动态计算播报间隔 - 更保守"""
             if elapsed < 15:
-                return 6.0  # 初始6秒
+                return 4.0  # 初始4秒
             elif elapsed < 30:
-                return 8.0  # 中期8秒
+                return 6.0  # 中期6秒
             else:
-                return 10.0  # 后期10秒
+                return 8.0  # 后期8秒
         output_index = 0
 
         async def run_thinker():
@@ -857,7 +867,7 @@ class Orchestrator:
                     new_stage = self._stage_from_shared_progress(shared.thinker_progress.current_stage)
                     current_step = shared.thinker_progress.current_step
                     total_steps = shared.thinker_progress.total_steps
-                    step_desc = ""
+                    step_desc = self._latest_shared_step_desc(shared)
                 else:
                     new_stage, current_step, total_steps, step_desc = self._parse_thinker_stage(accumulated_output)
 
@@ -907,7 +917,7 @@ class Orchestrator:
                     new_stage = self._stage_from_shared_progress(shared.thinker_progress.current_stage)
                     current_step = shared.thinker_progress.current_step
                     total_steps = shared.thinker_progress.total_steps
-                    step_desc = ""
+                    step_desc = self._latest_shared_step_desc(shared)
                 else:
                     new_stage, current_step, total_steps, step_desc = self._parse_thinker_stage(accumulated_output)
 

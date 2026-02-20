@@ -124,7 +124,7 @@ class ThinkerAgent:
             # 1. 任务规划
             yield "[思考] 正在分析任务...\n"
             if shared:
-                shared.update_thinker_progress(stage="analyzing")
+                shared.update_thinker_progress(stage="analyzing", result="分析任务需求")
             plan_start = time.time()
             plan = await self.plan_task(user_input, context)
             plan_time = (time.time() - plan_start) * 1000
@@ -135,7 +135,7 @@ class ThinkerAgent:
             yield f"\n[规划] 任务目标: {plan.intent}\n"
             yield f"[规划] 共{len(plan.steps)}个步骤\n\n"
             if shared:
-                shared.update_thinker_progress(stage="planning", total=len(plan.steps))
+                shared.update_thinker_progress(stage="planning", total=len(plan.steps), result="制定执行计划")
 
             # 3. 逐步执行
             step_results: List[StepResult] = []
@@ -145,7 +145,12 @@ class ThinkerAgent:
 
                 yield f"[步骤{step_num}] {step.get('name', '执行中...')}...\n"
                 if shared:
-                    shared.update_thinker_progress(stage="executing", step=step_num, total=len(plan.steps))
+                    shared.update_thinker_progress(
+                        stage="executing",
+                        step=step_num,
+                        total=len(plan.steps),
+                        result=step.get("name", "执行中"),
+                    )
                 await self._report_progress(
                     f"执行步骤{step_num}/{len(plan.steps)}",
                     progress,
@@ -171,7 +176,7 @@ class ThinkerAgent:
             # 4. 生成最终答案
             yield "\n[思考] 整合结果，生成最终答案...\n"
             if shared:
-                shared.update_thinker_progress(stage="synthesizing")
+                shared.update_thinker_progress(stage="synthesizing", result="整合结果并生成答案")
             await self._report_progress("生成最终答案", 85)
 
             answer_start = time.time()
@@ -209,7 +214,7 @@ class ThinkerAgent:
             # 6. 输出最终结果
             await self._report_progress("完成", 100)
             if shared:
-                shared.update_thinker_progress(stage="completed")
+                shared.update_thinker_progress(stage="completed", result="答案生成完成")
             self._stats["successful_tasks"] += 1
 
             yield "\n[答案]\n"

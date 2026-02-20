@@ -151,6 +151,16 @@ class TaskManager:
         if any(kw in text for kw in cancel_keywords):
             return UserIntent.REPLACE
 
+        # === 0.05 明确补充信息（优先于新任务）===
+        # 避免“帮我补充...”被误判为新任务替换
+        modify_keywords = [
+            "另外", "还有", "加上", "补充", "再加", "也要",
+            "或者", "改为", "换成", "最好是", "注意", "顺便",
+            "并且", "同时", "补充下", "补充一下",
+        ]
+        if any(kw in text for kw in modify_keywords):
+            return UserIntent.MODIFY
+
         # === 0.1 显式新任务（高优先级）===
         explicit_new_task_phrases = [
             "我要", "我想", "帮我", "给我", "麻烦", "请你", "请帮", "重新帮我",
@@ -233,10 +243,6 @@ class TaskManager:
                 return UserIntent.REPLACE
 
         # === 7. 补充/修改信息的关键词 ===
-        modify_keywords = [
-            "另外", "还有", "加上", "补充", "再加", "也要",
-            "或者", "改为", "换成", "最好是", "注意",
-        ]
         if any(kw in text for kw in modify_keywords):
             return UserIntent.MODIFY
 

@@ -57,6 +57,17 @@ class TestP0IntentHandling:
 
         await manager.cancel_current_task()
 
+    @pytest.mark.asyncio
+    async def test_supplement_should_be_modify(self):
+        manager = TaskManager()
+        task = asyncio.create_task(asyncio.sleep(60))
+        manager.start_task(task, "详细对比滴滴和高德打车")
+
+        intent = manager.classify_intent("另外补充一下最新优惠活动和夜间加价")
+        assert intent == UserIntent.MODIFY
+
+        await manager.cancel_current_task()
+
 
 class TestP1SharedContextFlow:
     def _create_orchestrator(self) -> Orchestrator:
@@ -89,6 +100,7 @@ class TestP1SharedContextFlow:
             chunks.append(chunk)
 
         merged = "".join(chunks)
+        assert "正在同步上下文并规划步骤" in merged
         assert "预算范围" in merged
         assert "Thinker: 开始处理" not in merged
         assert shared.needs_clarification() is True
@@ -98,3 +110,10 @@ class TestP1SharedContextFlow:
         orchestrator = self._create_orchestrator()
         stage = orchestrator._stage_from_shared_progress("executing")
         assert stage.value == "executing"
+
+    @pytest.mark.asyncio
+    async def test_latest_shared_step_desc(self):
+        orchestrator = self._create_orchestrator()
+        shared = SharedContext(user_input="帮我对比打车平台")
+        shared.update_thinker_progress(stage="executing", step=1, total=3, result="收集平台口碑")
+        assert orchestrator._latest_shared_step_desc(shared) == "收集平台口碑"
