@@ -68,6 +68,22 @@ class TestP0IntentHandling:
 
         await manager.cancel_current_task()
 
+    @pytest.mark.asyncio
+    async def test_status_phrase_should_be_query_status(self):
+        manager = TaskManager()
+        task = asyncio.create_task(asyncio.sleep(60))
+        manager.start_task(task, "推荐下怎么选车")
+
+        intent = manager.classify_intent("有啥信息没")
+        assert intent == UserIntent.QUERY_STATUS
+
+        await manager.cancel_current_task()
+
+    def test_extract_replacement_input(self):
+        manager = TaskManager()
+        replacement = manager.extract_replacement_input("不想打车了，定个餐馆")
+        assert replacement == "定个餐馆"
+
 
 class TestP1SharedContextFlow:
     def _create_orchestrator(self) -> Orchestrator:
@@ -117,3 +133,14 @@ class TestP1SharedContextFlow:
         shared = SharedContext(user_input="帮我对比打车平台")
         shared.update_thinker_progress(stage="executing", step=1, total=3, result="收集平台口碑")
         assert orchestrator._latest_shared_step_desc(shared) == "收集平台口碑"
+
+    @pytest.mark.asyncio
+    async def test_idle_stage_broadcast_template(self):
+        orchestrator = self._create_orchestrator()
+        msg, template = orchestrator._generate_stage_broadcast(
+            stage=orchestrator._progress_state.current_stage,
+            user_query="推荐下怎么选车",
+            elapsed_time=5,
+        )
+        assert "正在" in msg or "Thinker已接手" in msg
+        assert template != ""

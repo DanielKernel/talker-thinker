@@ -251,6 +251,26 @@ class Orchestrator:
             # 所有模板都用过了，返回默认
             return templates[0]
 
+        if stage == ThinkerStage.IDLE:
+            if style == "initial":
+                templates = [
+                    "Thinker已接手，正在加载上下文",
+                    "正在准备分析环境",
+                    "正在同步任务信息",
+                ]
+            elif style == "progress":
+                templates = [
+                    "仍在准备分析，请稍候",
+                    "即将开始深度分析",
+                ]
+            else:
+                templates = ["准备工作进行中"]
+
+            template = get_unused_template(templates, used_templates)
+            if template == "准备工作进行中":
+                return f"{template} ({elapsed_time:.0f}s)...", template
+            return f"{template}...", template
+
         if stage == ThinkerStage.ANALYZING:
             if style == "initial":
                 templates = [
@@ -779,38 +799,46 @@ class Orchestrator:
             precheck_ts = format_timestamp(time.time())
             yield f"\n[{precheck_ts}] Talker: 正在同步上下文并规划步骤，请稍候..."
 
-        # === 澄清机制：检测是否需要澄清 ===
-        try:
-            # 快速规划以检测是否需要澄清
+        # === 澄清机制：检测是否需要澄清（带主动播报） ===
+        async def run_precheck():
             quick_plan = await self.thinker.plan_task(user_input, context)
             needs_clarification, reason, missing_info = await self.thinker.needs_clarification(
                 user_input, quick_plan, context
             )
-
+            question = None
             if needs_clarification and missing_info and shared:
-                # 生成澄清问题
                 question = await self.thinker.generate_clarification_question(
                     user_input, missing_info, context
                 )
+            return needs_clarification, reason, missing_info, question
 
-                # 通过Talker向用户提问
+        precheck_task = asyncio.create_task(run_precheck())
+        precheck_last_broadcast = thinker_start
+        precheck_templates = ["仍在分析关键信息", "正在核对必要条件", "即将进入详细推理"]
+        precheck_idx = 0
+
+        while not precheck_task.done():
+            now = time.time()
+            if now - precheck_last_broadcast >= 5.0:
+                msg = precheck_templates[precheck_idx % len(precheck_templates)]
+                ts = format_timestamp(now)
+                yield f"\n[{ts}] Talker: {msg}..."
+                if shared:
+                    shared.add_talker_interaction(msg, "broadcast")
+                precheck_last_broadcast = now
+                precheck_idx += 1
+            await asyncio.sleep(0.1)
+
+        try:
+            needs_clarification, reason, missing_info, question = await precheck_task
+            if needs_clarification and missing_info and shared and question:
                 ts = format_timestamp(time.time())
                 yield f"\n[{ts}] Talker: {question}"
                 shared.add_talker_interaction(question, "clarification")
-
-                # 记录澄清请求
                 shared.add_clarification_request(question, reason or "", [])
-
-                # 等待用户回答（通过队列机制）
-                # 注意：这里使用简化的方式，实际回答会在下一次process中处理
-                # 将澄清状态保存到共享上下文供下次使用
                 shared.clarification_status = ClarificationStatus.PENDING
-
-                # 本轮暂停处理，等待用户在下一轮回答澄清问题
                 return
-
         except Exception:
-            # 澄清检测失败，继续正常处理
             pass
 
         # 记录Handoff到Thinker
@@ -1038,6 +1066,10 @@ class Orchestrator:
         elif user_input:
             self._shared_contexts[session_id].user_input = user_input
         return self._shared_contexts[session_id]
+
+    def get_shared_context(self, session_id: str) -> Optional[SharedContext]:
+        """获取会话共享上下文（只读访问）。"""
+        return self._shared_contexts.get(session_id)
 
     def _record_handoff(
         self,

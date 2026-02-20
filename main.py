@@ -4,6 +4,7 @@ Talker-Thinker 双Agent系统主入口
 import argparse
 import asyncio
 import json
+import re
 import sys
 import time
 from enum import Enum
@@ -42,6 +43,7 @@ class TaskManager:
         self._task_context: Optional[dict] = None  # 保存暂停时的上下文
         self._task_start_time: float = 0  # 任务开始时间
         self._current_topic: Optional[str] = None
+        self._pending_replacement_input: Optional[str] = None
 
     @property
     def is_processing(self) -> bool:
@@ -58,6 +60,10 @@ class TaskManager:
     @property
     def task_start_time(self) -> float:
         return self._task_start_time
+
+    @property
+    def pending_replacement_input(self) -> Optional[str]:
+        return self._pending_replacement_input
 
     def start_task(self, task: asyncio.Task, user_input: str):
         """开始新任务"""
@@ -79,6 +85,11 @@ class TaskManager:
         self._paused = False
         self._task_context = None
         self._current_topic = None
+        self._pending_replacement_input = None
+
+    def set_pending_replacement_input(self, text: Optional[str]) -> None:
+        """设置用户替换任务的新输入。"""
+        self._pending_replacement_input = text
 
     async def pause_current_task(self) -> bool:
         """暂停当前任务"""
@@ -174,11 +185,12 @@ class TaskManager:
             "有人在", "在吗", "在不在", "人呢", "还在吗",
             "太慢", "好慢", "怎么这么慢", "等好久了",
             "好了吗", "怎么样了", "完成没", "进度",
+            "有啥信息", "有结果没", "有什么进展", "进展咋样", "信息没",
             "没回应", "没反应", "不回应", "不反应",
             "你在干啥", "你在干嘛", "分析啥", "在做什么",
         ]
         if any(q in text for q in waiting_questions):
-            if any(q in text for q in ["吗", "？", "?", "在", "没"]):
+            if any(q in text for q in ["吗", "？", "?", "在", "没", "啥", "进展"]):
                 return UserIntent.QUERY_STATUS
             return UserIntent.COMMENT
 
@@ -256,6 +268,21 @@ class TaskManager:
 
         # === 9. 默认：不打断任务 ===
         return UserIntent.COMMENT
+
+    def extract_replacement_input(self, text: str) -> str:
+        """从“取消+新任务”的复合输入中提取新任务意图。"""
+        chunks = [c.strip() for c in re.split(r"[，,。；;！!？?]", text) if c.strip()]
+        if not chunks:
+            return text
+        new_task_markers = [
+            "我要", "我想", "帮我", "给我", "请", "麻烦", "定", "订", "推荐", "查", "分析", "比较", "找",
+            "餐馆", "吃饭", "打车", "选车", "买车",
+        ]
+        for chunk in chunks:
+            if any(m in chunk for m in new_task_markers):
+                if not any(k in chunk for k in ["取消", "不用", "不想", "算了", "停止"]):
+                    return chunk
+        return text
 
     def _is_likely_new_task(self, text: str) -> bool:
         """判断输入是否更像新任务而不是附和/评论。"""
@@ -484,6 +511,35 @@ class TalkerThinkerApp:
         self.task_manager.start_task(task, user_input)
         return task
 
+    def _get_shared_context(self, session_id: str):
+        """获取当前会话共享上下文。"""
+        if self.orchestrator and session_id:
+            return self.orchestrator.get_shared_context(session_id)
+        return None
+
+    def _build_status_reply(self, session_id: str, current: str, elapsed: float) -> str:
+        """基于SharedContext构建状态反馈。"""
+        shared = self._get_shared_context(session_id)
+        if not shared:
+            return f"\n[Talker] 正在处理「{current[:30]}...」，已用时{elapsed:.0f}秒，请稍候"
+        progress = shared.thinker_progress
+        stage_map = {
+            "idle": "准备中",
+            "analyzing": "分析需求中",
+            "planning": "规划方案中",
+            "executing": "执行步骤中",
+            "synthesizing": "整合答案中",
+            "completed": "已完成",
+        }
+        stage_text = stage_map.get(progress.current_stage, "处理中")
+        latest = progress.partial_results[-1] if progress.partial_results else ""
+        if progress.total_steps > 0 and progress.current_step > 0:
+            step_text = f"（第{progress.current_step}/{progress.total_steps}步）"
+        else:
+            step_text = ""
+        detail = f"，当前：{latest}" if latest else ""
+        return f"\n[Talker] 正在处理「{current[:26]}...」{step_text}，{stage_text}，已用时{elapsed:.0f}秒{detail}"
+
     async def _handle_new_input_during_processing(
         self,
         new_input: str,
@@ -532,7 +588,7 @@ class TalkerThinkerApp:
         elif intent == UserIntent.QUERY_STATUS:
             # 查询状态，给详细反馈
             elapsed = time.time() - self.task_manager.task_start_time
-            return True, f"\n[Talker] 正在处理「{current[:30]}...」，已用时{elapsed:.0f}秒，请稍候"
+            return True, self._build_status_reply(session_id, current, elapsed)
 
         elif intent == UserIntent.REPLACE:
             # 取消当前任务，处理新任务
@@ -540,12 +596,19 @@ class TalkerThinkerApp:
             print("⚠️ 上一任务已被用户打断")
             print("━" * 50)
 
+            replacement_input = self.task_manager.extract_replacement_input(new_input.strip())
+            self.task_manager.set_pending_replacement_input(replacement_input)
             await self.task_manager.cancel_current_task()
             return False, None  # 返回False表示需要处理新任务
 
         elif intent == UserIntent.MODIFY:
             # 补充信息，确认收到
-            return True, f"\n[Talker] 收到补充信息「{new_input[:20]}」，已更新处理中..."
+            shared = self._get_shared_context(session_id)
+            if shared:
+                shared.update_intent_with_clarification(new_input)
+                shared.add_constraint(new_input)
+                shared.add_talker_interaction(f"补充信息: {new_input}", "response")
+            return True, f"\n[Talker] 收到补充信息「{new_input[:20]}」，已并入当前任务继续处理..."
 
         elif intent == UserIntent.PAUSE:
             # 暂停当前任务
@@ -663,6 +726,7 @@ class TalkerThinkerApp:
                     process_task = await self._process_as_task(
                         user_input, session_id, input_time
                     )
+                    pending_new_input: Optional[str] = None
 
                     # 等待任务完成，同时监听新输入
                     while not process_task.done():
@@ -685,7 +749,11 @@ class TalkerThinkerApp:
                                         print(response)
                                 else:
                                     # 需要处理新任务
-                                    user_input = new_input.strip()
+                                    pending_new_input = (
+                                        self.task_manager.pending_replacement_input
+                                        or new_input.strip()
+                                    )
+                                    self.task_manager.set_pending_replacement_input(None)
                                     input_time = time.time()
                                     break  # 退出等待循环，开始处理新任务
 
@@ -696,9 +764,22 @@ class TalkerThinkerApp:
                     if process_task.done():
                         self.task_manager.end_task()
                         print()  # 换行
+                        if pending_new_input:
+                            user_input = pending_new_input
+                            self.task_manager._cancelled = False
+                            process_task = await self._process_as_task(
+                                user_input, session_id, input_time
+                            )
+                            try:
+                                await process_task
+                            except asyncio.CancelledError:
+                                pass
+                            self.task_manager.end_task()
+                            print()
                     else:
                         # 被打断，处理新任务
                         self.task_manager._cancelled = False
+                        user_input = pending_new_input or user_input
                         process_task = await self._process_as_task(
                             user_input, session_id, input_time
                         )
