@@ -45,6 +45,15 @@ class TestTalkerAgent:
         assert "total_requests" in stats
         assert "success_rate" in stats
 
+    def test_prompt_includes_user_preferences(self, talker_agent):
+        prompt = talker_agent._build_response_prompt(
+            "我的口味知道吗",
+            context={"messages": [], "user_preferences": {"taste": "喜欢吃辣"}},
+            mode="quick",
+        )
+        assert "用户长期偏好" in prompt
+        assert "喜欢吃辣" in prompt
+
 
 class TestThinkerAgent:
     """ThinkerAgent测试类"""

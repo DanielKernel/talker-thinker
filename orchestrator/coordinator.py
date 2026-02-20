@@ -367,6 +367,16 @@ class Orchestrator:
             return words[0]
         return "您的问题"
 
+    def _extract_user_preferences(self, text: str) -> Dict[str, str]:
+        """从输入中提取可持久化的用户偏好。"""
+        text = (text or "").lower()
+        prefs: Dict[str, str] = {}
+        if any(k in text for k in ["喜欢吃辣", "爱吃辣", "能吃辣", "口味重"]):
+            prefs["taste"] = "喜欢吃辣"
+        elif any(k in text for k in ["不吃辣", "不能吃辣", "清淡"]):
+            prefs["taste"] = "偏清淡/不吃辣"
+        return prefs
+
     def _should_broadcast(
         self,
         new_stage: ThinkerStage,
@@ -466,6 +476,17 @@ class Orchestrator:
 
         # 创建/获取共享上下文
         shared = self._get_or_create_shared_context(session_id)
+        global_pref_sid = "__global_user__"
+        persisted_prefs = await self.session_context.get_session_data(
+            global_pref_sid, "user_preferences", {}
+        ) or {}
+        extracted_prefs = self._extract_user_preferences(user_input)
+        if extracted_prefs:
+            persisted_prefs.update(extracted_prefs)
+            await self.session_context.set_session_data(
+                global_pref_sid, "user_preferences", persisted_prefs, ttl=86400 * 30
+            )
+        shared.user_preferences = persisted_prefs
         if not shared.needs_clarification():
             shared.user_input = user_input
             shared.clarified_intent = user_input
@@ -513,6 +534,7 @@ class Orchestrator:
             "shared": shared,  # 添加共享上下文
             "session_summary": session_summary,  # 添加会话摘要
             "effective_input": effective_input,
+            "user_preferences": persisted_prefs,
         }
 
         # 收集助手响应用于保存到会话
@@ -810,27 +832,39 @@ class Orchestrator:
                 question = await self.thinker.generate_clarification_question(
                     user_input, missing_info, context
                 )
-            return needs_clarification, reason, missing_info, question
+            return quick_plan, needs_clarification, reason, missing_info, question
 
         precheck_task = asyncio.create_task(run_precheck())
         precheck_last_broadcast = thinker_start
         precheck_templates = ["仍在分析关键信息", "正在核对必要条件", "即将进入详细推理"]
         precheck_idx = 0
+        last_precheck_template = ""
 
         while not precheck_task.done():
             now = time.time()
             if now - precheck_last_broadcast >= 5.0:
-                msg = precheck_templates[precheck_idx % len(precheck_templates)]
-                ts = format_timestamp(now)
-                yield f"\n[{ts}] Talker: {msg}..."
-                if shared:
-                    shared.add_talker_interaction(msg, "broadcast")
+                if precheck_idx < len(precheck_templates):
+                    msg = precheck_templates[precheck_idx]
+                    msg_template = f"precheck_{precheck_idx}"
+                else:
+                    elapsed = int(now - thinker_start)
+                    msg = f"预分析进行中（{elapsed}s）"
+                    msg_template = f"precheck_elapsed_{elapsed // 10}"
+                if msg_template != last_precheck_template:
+                    ts = format_timestamp(now)
+                    yield f"\n[{ts}] Talker: {msg}..."
+                    if shared:
+                        shared.add_talker_interaction(msg, "broadcast")
+                    last_precheck_template = msg_template
                 precheck_last_broadcast = now
                 precheck_idx += 1
             await asyncio.sleep(0.1)
 
         try:
-            needs_clarification, reason, missing_info, question = await precheck_task
+            quick_plan, needs_clarification, reason, missing_info, question = await precheck_task
+            if not needs_clarification and quick_plan and getattr(quick_plan, "steps", None):
+                ts = format_timestamp(time.time())
+                yield f"\n[{ts}] Talker: Thinker已完成规划，预计{len(quick_plan.steps)}步执行"
             if needs_clarification and missing_info and shared and question:
                 ts = format_timestamp(time.time())
                 yield f"\n[{ts}] Talker: {question}"

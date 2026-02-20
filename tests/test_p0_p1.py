@@ -84,6 +84,28 @@ class TestP0IntentHandling:
         replacement = manager.extract_replacement_input("不想打车了，定个餐馆")
         assert replacement == "定个餐馆"
 
+    @pytest.mark.asyncio
+    async def test_context_phrase_should_be_modify(self):
+        manager = TaskManager()
+        task = asyncio.create_task(asyncio.sleep(60))
+        manager.start_task(task, "帮我对比不同家具")
+
+        intent = manager.classify_intent("对比家具啊")
+        assert intent == UserIntent.MODIFY
+
+        await manager.cancel_current_task()
+
+    @pytest.mark.asyncio
+    async def test_explicit_new_task_should_replace(self):
+        manager = TaskManager()
+        task = asyncio.create_task(asyncio.sleep(60))
+        manager.start_task(task, "帮我对比不同家具")
+
+        intent = manager.classify_intent("定个餐馆吧")
+        assert intent == UserIntent.REPLACE
+
+        await manager.cancel_current_task()
+
 
 class TestP1SharedContextFlow:
     def _create_orchestrator(self) -> Orchestrator:
@@ -144,3 +166,9 @@ class TestP1SharedContextFlow:
         )
         assert "正在" in msg or "Thinker已接手" in msg
         assert template != ""
+
+    @pytest.mark.asyncio
+    async def test_extract_user_preferences(self):
+        orchestrator = self._create_orchestrator()
+        prefs = orchestrator._extract_user_preferences("我喜欢吃辣，重口味一点")
+        assert prefs.get("taste") == "喜欢吃辣"

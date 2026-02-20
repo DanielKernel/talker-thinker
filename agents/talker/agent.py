@@ -475,6 +475,12 @@ class TalkerAgent:
                     f"[{'用户' if m.get('role') == 'user' else '助手'}]: {m.get('content', '')[:200]}"
                     for m in recent
                 ]) + "\n"
+        pref_str = ""
+        if context and context.get("user_preferences"):
+            prefs = context.get("user_preferences", {})
+            pref_items = [f"{k}={v}" for k, v in prefs.items()]
+            if pref_items:
+                pref_str = "\n用户长期偏好：" + "；".join(pref_items) + "\n"
 
         if mode == "quick":
             # 根据问题类型调整系统提示
@@ -486,8 +492,8 @@ class TalkerAgent:
                 system_hint = "你是一个友好、高效的对话助手。请简洁地回复用户。"
 
             return f"""{system_hint}
-{context_str}
-当前用户消息：{user_input}
+            {context_str}{pref_str}
+            当前用户消息：{user_input}
 
 要求：
 1. 回复简洁（不超过100字）
@@ -505,8 +511,8 @@ class TalkerAgent:
                 system_hint = "你是一个友好的对话助手。"
 
             return f"""{system_hint}
-{context_str}
-当前用户问题：{user_input}
+            {context_str}{pref_str}
+            当前用户问题：{user_input}
 
 请提供一个有帮助的回答（200字以内）："""
 

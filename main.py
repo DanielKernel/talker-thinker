@@ -91,6 +91,16 @@ class TaskManager:
         """设置用户替换任务的新输入。"""
         self._pending_replacement_input = text
 
+    def augment_current_input(self, extra: str) -> None:
+        """将用户补充信息并入当前任务描述。"""
+        extra = (extra or "").strip()
+        if not extra:
+            return
+        if self._current_input:
+            self._current_input = f"{self._current_input}；补充：{extra}"
+        else:
+            self._current_input = extra
+
     async def pause_current_task(self) -> bool:
         """暂停当前任务"""
         if self._current_task and not self._current_task.done() and not self._paused:
@@ -172,9 +182,19 @@ class TaskManager:
         if any(kw in text for kw in modify_keywords):
             return UserIntent.MODIFY
 
+        # === 0.06 上下文补充短句（优先于新任务）===
+        contextual_markers = [
+            "对比", "关于", "就是", "比如", "例如", "这个", "那个", "app", "软件", "平台", "家具",
+        ]
+        explicit_new_task_markers = ["我要", "我想", "帮我", "给我", "请", "麻烦", "定个", "订个"]
+        if len(text) <= 14 and any(m in text for m in contextual_markers):
+            if not any(m in text for m in explicit_new_task_markers):
+                return UserIntent.MODIFY
+
         # === 0.1 显式新任务（高优先级）===
         explicit_new_task_phrases = [
             "我要", "我想", "帮我", "给我", "麻烦", "请你", "请帮", "重新帮我",
+            "定个", "订个", "改成", "改查", "换成",
         ]
         if any(phrase in text for phrase in explicit_new_task_phrases):
             if self._is_likely_new_task(text):
@@ -251,7 +271,7 @@ class TaskManager:
                 return UserIntent.REPLACE
 
             # 如果包含明确的任务词
-            if len(text) > 5:
+            if len(text) >= 4:
                 return UserIntent.REPLACE
 
         # === 7. 补充/修改信息的关键词 ===
@@ -387,6 +407,8 @@ class TaskManager:
             "打车": ["打车", "滴滴", "高德", " taxi", "专车", "快车"],
             "咖啡": ["咖啡", "拿铁", "星巴克", "瑞幸"],
             "美食": ["餐厅", "美食", "吃的", "推荐菜", "吃饭", "吃"],
+            "家具": ["家具", "沙发", "床", "桌子", "椅子", "家居"],
+            "应用": ["app", "软件", "应用", "平台"],
             "购物": ["买", "购物", "价格", "便宜"],
             "旅游": ["旅游", "景点", "酒店", "机票"],
         }
@@ -604,6 +626,7 @@ class TalkerThinkerApp:
         elif intent == UserIntent.MODIFY:
             # 补充信息，确认收到
             shared = self._get_shared_context(session_id)
+            self.task_manager.augment_current_input(new_input)
             if shared:
                 shared.update_intent_with_clarification(new_input)
                 shared.add_constraint(new_input)
