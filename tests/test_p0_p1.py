@@ -172,3 +172,27 @@ class TestP1SharedContextFlow:
         orchestrator = self._create_orchestrator()
         prefs = orchestrator._extract_user_preferences("我喜欢吃辣，重口味一点")
         assert prefs.get("taste") == "喜欢吃辣"
+
+    @pytest.mark.asyncio
+    async def test_precheck_timeout_falls_back_to_thinker(self):
+        orchestrator = self._create_orchestrator()
+        orchestrator._precheck_timeout_s = 0.05
+        context = {"shared": SharedContext(user_input="推荐个汽车吧"), "messages": []}
+
+        async def slow_plan(*args, **kwargs):
+            await asyncio.sleep(0.2)
+            return type("Plan", (), {"steps": [{"name": "分析", "description": "分析需求"}]})()
+
+        async def fake_process(*args, **kwargs):
+            yield "[思考] 正在分析任务...\n"
+
+        orchestrator.thinker.plan_task = slow_plan
+        orchestrator.thinker.process = fake_process
+
+        chunks = []
+        async for chunk in orchestrator._collaboration_handoff("推荐个汽车吧", context):
+            chunks.append(chunk)
+
+        merged = "".join(chunks)
+        assert "预分析耗时较长" in merged
+        assert "Thinker: 开始处理" in merged

@@ -132,6 +132,7 @@ class Orchestrator:
             "handoffs": 0,
             "errors": 0,
         }
+        self._precheck_timeout_s = 15.0
 
         # 进度状态
         self._progress_state = ProgressState()
@@ -839,9 +840,19 @@ class Orchestrator:
         precheck_templates = ["仍在分析关键信息", "正在核对必要条件", "即将进入详细推理"]
         precheck_idx = 0
         last_precheck_template = ""
+        precheck_timed_out = False
 
         while not precheck_task.done():
             now = time.time()
+            if now - thinker_start >= self._precheck_timeout_s:
+                precheck_timed_out = True
+                precheck_task.cancel()
+                ts = format_timestamp(now)
+                timeout_msg = "预分析耗时较长，先进入详细处理"
+                yield f"\n[{ts}] Talker: {timeout_msg}..."
+                if shared:
+                    shared.add_talker_interaction(timeout_msg, "broadcast")
+                break
             if now - precheck_last_broadcast >= 5.0:
                 if precheck_idx < len(precheck_templates):
                     msg = precheck_templates[precheck_idx]
@@ -860,18 +871,22 @@ class Orchestrator:
                 precheck_idx += 1
             await asyncio.sleep(0.1)
 
+        quick_plan = None
         try:
-            quick_plan, needs_clarification, reason, missing_info, question = await precheck_task
-            if not needs_clarification and quick_plan and getattr(quick_plan, "steps", None):
-                ts = format_timestamp(time.time())
-                yield f"\n[{ts}] Talker: Thinker已完成规划，预计{len(quick_plan.steps)}步执行"
-            if needs_clarification and missing_info and shared and question:
-                ts = format_timestamp(time.time())
-                yield f"\n[{ts}] Talker: {question}"
-                shared.add_talker_interaction(question, "clarification")
-                shared.add_clarification_request(question, reason or "", [])
-                shared.clarification_status = ClarificationStatus.PENDING
-                return
+            if not precheck_timed_out:
+                quick_plan, needs_clarification, reason, missing_info, question = await precheck_task
+                if not needs_clarification and quick_plan and getattr(quick_plan, "steps", None):
+                    ts = format_timestamp(time.time())
+                    yield f"\n[{ts}] Talker: Thinker已完成规划，预计{len(quick_plan.steps)}步执行"
+                if needs_clarification and missing_info and shared and question:
+                    ts = format_timestamp(time.time())
+                    yield f"\n[{ts}] Talker: {question}"
+                    shared.add_talker_interaction(question, "clarification")
+                    shared.add_clarification_request(question, reason or "", [])
+                    shared.clarification_status = ClarificationStatus.PENDING
+                    return
+        except asyncio.CancelledError:
+            pass
         except Exception:
             pass
 

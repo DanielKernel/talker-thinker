@@ -172,3 +172,22 @@ Talker: 收到，继续处理「这个重复有点明显...」
 - `test_explicit_new_task_should_replace`
 - `test_extract_user_preferences`
 - `test_prompt_includes_user_preferences`
+
+## 2026-02-20 会话E：Thinker无响应排查
+
+### 原始现象
+```
+Talker持续播报“仍在分析/核对条件/即将推理...”
+但长时间没有“Thinker: 开始处理”与Thinker正文输出
+最终才再次出现澄清问题
+```
+
+### 根因
+`_collaboration_handoff` 在进入 Thinker 主处理前，会先执行 precheck（`plan_task + needs_clarification`）。  
+当 precheck 过慢时，流程被卡在 precheck 阶段，导致用户看到“Talker一直播报、Thinker不说话”。
+
+### 本轮修复
+1. 为 precheck 增加超时（`_precheck_timeout_s`，默认15秒）。  
+2. precheck 超时后主动提示：`预分析耗时较长，先进入详细处理...`。  
+3. 立即进入 Thinker 主处理，避免“无限前置播报”。  
+4. 增加回归测试 `test_precheck_timeout_falls_back_to_thinker`，确保超时后仍会输出 `Thinker: 开始处理`。
