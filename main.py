@@ -30,6 +30,14 @@ class UserIntent(Enum):
     BACKCHANNEL = "backchannel"  # 附和/应答（不打断任务）
 
 
+class InterruptAction(Enum):
+    """任务中断后的执行动作"""
+    CONTINUE = "continue"
+    MODIFY_CURRENT = "modify_current"
+    CANCEL_ONLY = "cancel_only"
+    REPLACE_WITH_NEW_TASK = "replace_with_new_task"
+
+
 class TaskManager:
     """任务管理器 - 管理任务状态和中断"""
 
@@ -304,6 +312,29 @@ class TaskManager:
                     return chunk
         return text
 
+    def decide_interrupt_action(self, new_input: str) -> tuple[InterruptAction, Optional[str]]:
+        """判断新输入应触发的任务中断动作。"""
+        intent = self.classify_intent(new_input)
+        text = (new_input or "").strip()
+        if not text:
+            return InterruptAction.CONTINUE, None
+
+        if intent == UserIntent.MODIFY:
+            return InterruptAction.MODIFY_CURRENT, None
+        if intent != UserIntent.REPLACE:
+            return InterruptAction.CONTINUE, None
+
+        replacement = self.extract_replacement_input(text)
+        cancel_keywords = ["取消", "停止", "算了", "不用", "不买", "不定", "不需要", "先不", "forget it", "cancel"]
+        has_cancel = any(k in text.lower() for k in cancel_keywords)
+        has_new_task_phrase = any(k in text for k in ["我要", "我想", "帮我", "给我", "定个", "订个", "换成", "改查", "改成"])
+
+        if replacement != text or has_new_task_phrase:
+            return InterruptAction.REPLACE_WITH_NEW_TASK, replacement
+        if has_cancel:
+            return InterruptAction.CANCEL_ONLY, None
+        return InterruptAction.REPLACE_WITH_NEW_TASK, replacement
+
     def _is_likely_new_task(self, text: str) -> bool:
         """判断输入是否更像新任务而不是附和/评论。"""
         current_topic = self._current_topic or self._extract_topic(self._current_input or "")
@@ -539,6 +570,15 @@ class TalkerThinkerApp:
             return self.orchestrator.get_shared_context(session_id)
         return None
 
+    async def _persist_preferences_from_input(self, text: str) -> None:
+        """从用户输入提取并持久化偏好。"""
+        if not self.orchestrator:
+            return
+        try:
+            await self.orchestrator.persist_user_preferences(text)
+        except Exception:
+            pass
+
     def _build_status_reply(self, session_id: str, current: str, elapsed: float) -> str:
         """基于SharedContext构建状态反馈。"""
         shared = self._get_shared_context(session_id)
@@ -578,6 +618,7 @@ class TalkerThinkerApp:
         Returns:
             tuple: (是否已处理, 响应内容)
         """
+        interrupt_action, replacement_input = self.task_manager.decide_interrupt_action(new_input)
         intent = self.task_manager.classify_intent(new_input)
         current = self.task_manager.current_input or "您的请求"
 
@@ -613,20 +654,21 @@ class TalkerThinkerApp:
             return True, self._build_status_reply(session_id, current, elapsed)
 
         elif intent == UserIntent.REPLACE:
-            # 取消当前任务，处理新任务
             print("\n" + "━" * 50)
             print("⚠️ 上一任务已被用户打断")
             print("━" * 50)
-
-            replacement_input = self.task_manager.extract_replacement_input(new_input.strip())
-            self.task_manager.set_pending_replacement_input(replacement_input)
             await self.task_manager.cancel_current_task()
+            if interrupt_action == InterruptAction.CANCEL_ONLY:
+                self.task_manager.set_pending_replacement_input(None)
+                return True, "\n[Talker] 好的，已取消当前任务。"
+            self.task_manager.set_pending_replacement_input(replacement_input or new_input.strip())
             return False, None  # 返回False表示需要处理新任务
 
         elif intent == UserIntent.MODIFY:
             # 补充信息，确认收到
             shared = self._get_shared_context(session_id)
             self.task_manager.augment_current_input(new_input)
+            await self._persist_preferences_from_input(new_input)
             if shared:
                 shared.update_intent_with_clarification(new_input)
                 shared.add_constraint(new_input)

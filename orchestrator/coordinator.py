@@ -368,21 +368,83 @@ class Orchestrator:
             return words[0]
         return "您的问题"
 
-    def _extract_user_preferences(self, text: str) -> Dict[str, str]:
-        """从输入中提取可持久化的用户偏好。"""
-        text = (text or "").lower()
-        prefs: Dict[str, str] = {}
+    def _extract_user_preferences(self, text: str) -> Dict[str, Any]:
+        """从输入中提取可持久化的用户偏好（通用建模，不强绑定具体场景）。"""
+        text = (text or "").lower().strip()
+        prefs: Dict[str, Any] = {}
+        likes: List[str] = []
+        dislikes: List[str] = []
+        constraints: List[str] = []
+
+        for pat in [r"我喜欢([^，。；,!?？]{1,20})", r"偏好([^，。；,!?？]{1,20})", r"更喜欢([^，。；,!?？]{1,20})"]:
+            likes.extend([m.strip() for m in re.findall(pat, text) if m.strip()])
+        for pat in [r"我不喜欢([^，。；,!?？]{1,20})", r"不要([^，。；,!?？]{1,20})", r"避免([^，。；,!?？]{1,20})"]:
+            dislikes.extend([m.strip() for m in re.findall(pat, text) if m.strip()])
+        for pat in [r"希望([^，。；,!?？]{1,20})", r"最好([^，。；,!?？]{1,20})", r"需要([^，。；,!?？]{1,20})"]:
+            constraints.extend([m.strip() for m in re.findall(pat, text) if m.strip()])
+
+        if likes:
+            prefs["likes"] = list(dict.fromkeys(likes))
+        if dislikes:
+            prefs["dislikes"] = list(dict.fromkeys(dislikes))
+        if constraints:
+            prefs["constraints"] = list(dict.fromkeys(constraints))
+
+        # 兼容既有高频偏好字段
         if any(k in text for k in ["喜欢吃辣", "爱吃辣", "能吃辣", "口味重"]):
             prefs["taste"] = "喜欢吃辣"
         elif any(k in text for k in ["不吃辣", "不能吃辣", "清淡"]):
             prefs["taste"] = "偏清淡/不吃辣"
+
+        budget_match = re.search(r"(\d{1,3})\s*万", text)
+        if budget_match:
+            prefs["budget"] = f"{budget_match.group(1)}万"
+        amount_match = re.search(r"(\d{2,6})\s*(元|块)", text)
+        if amount_match and "budget" not in prefs:
+            prefs["budget"] = f"{amount_match.group(1)}{amount_match.group(2)}"
+
+        if "suv" in text or "越野" in text:
+            prefs["car_type"] = "偏好SUV"
+        elif "轿车" in text:
+            prefs["car_type"] = "偏好轿车"
         return prefs
+
+    def _merge_user_preferences(self, base: Dict[str, Any], new: Dict[str, Any]) -> Dict[str, Any]:
+        """合并偏好：列表去重并保序，字典递归合并，标量覆盖。"""
+        merged: Dict[str, Any] = dict(base or {})
+        for k, v in (new or {}).items():
+            if k not in merged:
+                merged[k] = v
+                continue
+            old = merged[k]
+            if isinstance(old, list) and isinstance(v, list):
+                merged[k] = list(dict.fromkeys([*old, *v]))
+            elif isinstance(old, dict) and isinstance(v, dict):
+                merged[k] = {**old, **v}
+            else:
+                merged[k] = v
+        return merged
+
+    async def persist_user_preferences(self, text: str) -> Dict[str, Any]:
+        """提取并持久化用户偏好，返回最新偏好。"""
+        global_pref_sid = "__global_user__"
+        persisted_prefs = await self.session_context.get_session_data(
+            global_pref_sid, "user_preferences", {}
+        ) or {}
+        extracted_prefs = self._extract_user_preferences(text)
+        if extracted_prefs:
+            persisted_prefs = self._merge_user_preferences(persisted_prefs, extracted_prefs)
+            await self.session_context.set_session_data(
+                global_pref_sid, "user_preferences", persisted_prefs, ttl=86400 * 30
+            )
+        return persisted_prefs
 
     def _should_broadcast(
         self,
         new_stage: ThinkerStage,
         current_step: int,
         elapsed_time: float,
+        content_hash: str,
         force_check: bool = False,
     ) -> tuple[bool, str]:
         """
@@ -407,6 +469,12 @@ class Orchestrator:
         # 步骤变化（执行阶段）
         if new_stage == ThinkerStage.EXECUTING and current_step != state.current_step and current_step > 0:
             return True, "step_changed"
+
+        # 无进度变化时，降低播报频率（仅保留心跳播报）
+        if content_hash == state.last_content_hash:
+            if current_time - state.last_broadcast < 15:
+                return False, "no_progress"
+            return True, "heartbeat"
 
         # 检查该阶段已使用的模板数量
         stage_key = new_stage.value
@@ -477,16 +545,7 @@ class Orchestrator:
 
         # 创建/获取共享上下文
         shared = self._get_or_create_shared_context(session_id)
-        global_pref_sid = "__global_user__"
-        persisted_prefs = await self.session_context.get_session_data(
-            global_pref_sid, "user_preferences", {}
-        ) or {}
-        extracted_prefs = self._extract_user_preferences(user_input)
-        if extracted_prefs:
-            persisted_prefs.update(extracted_prefs)
-            await self.session_context.set_session_data(
-                global_pref_sid, "user_preferences", persisted_prefs, ttl=86400 * 30
-            )
+        persisted_prefs = await self.persist_user_preferences(user_input)
         shared.user_preferences = persisted_prefs
         if not shared.needs_clarification():
             shared.user_input = user_input
@@ -949,18 +1008,37 @@ class Orchestrator:
                     new_stage, current_step, total_steps, step_desc = self._parse_thinker_stage(accumulated_output)
 
                 # 检查是否需要播报
-                should_broadcast, reason = self._should_broadcast(new_stage, current_step, elapsed)
+                content_hash = f"{new_stage.value}:{current_step}:{total_steps}:{step_desc[:20]}"
+                should_broadcast, reason = self._should_broadcast(
+                    new_stage,
+                    current_step,
+                    elapsed,
+                    content_hash,
+                )
 
                 if should_broadcast:
                     # 生成播报消息和模板
-                    broadcast_msg, msg_template = self._generate_stage_broadcast(
-                        stage=new_stage,
-                        user_query=user_input,
-                        elapsed_time=elapsed,
-                        current_step=current_step,
-                        total_steps=total_steps,
-                        step_desc=step_desc,
-                    )
+                    if reason == "heartbeat":
+                        stage_zh = {
+                            ThinkerStage.ANALYZING: "分析",
+                            ThinkerStage.PLANNING: "规划",
+                            ThinkerStage.EXECUTING: "执行",
+                            ThinkerStage.SYNTHESIZING: "整合",
+                            ThinkerStage.IDLE: "准备",
+                            ThinkerStage.COMPLETED: "收尾",
+                        }.get(new_stage, "处理")
+                        bucket = int(elapsed // 15)
+                        broadcast_msg = f"仍在{stage_zh}阶段（{elapsed:.0f}s）"
+                        msg_template = f"heartbeat_{new_stage.value}_{bucket}"
+                    else:
+                        broadcast_msg, msg_template = self._generate_stage_broadcast(
+                            stage=new_stage,
+                            user_query=user_input,
+                            elapsed_time=elapsed,
+                            current_step=current_step,
+                            total_steps=total_steps,
+                            step_desc=step_desc,
+                        )
 
                     # 基于模板去重（不是完整消息）
                     if msg_template != self._progress_state.last_broadcast_msg_template:
@@ -980,6 +1058,7 @@ class Orchestrator:
                         self._progress_state.used_message_templates = {}
                     self._progress_state.current_step = current_step
                     self._progress_state.total_steps = total_steps
+                    self._progress_state.last_content_hash = content_hash
 
                 last_broadcast_time = current_time
 
@@ -1004,6 +1083,7 @@ class Orchestrator:
                     self._progress_state.last_stage_change = current_time
                 self._progress_state.current_step = current_step
                 self._progress_state.total_steps = total_steps
+                self._progress_state.last_content_hash = f"{new_stage.value}:{current_step}:{total_steps}:{step_desc[:20]}"
 
                 # Thinker输出加时间戳
                 if chunk.strip():

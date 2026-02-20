@@ -3,7 +3,7 @@ import asyncio
 import pytest
 
 from context.shared_context import SharedContext
-from main import TalkerThinkerApp, TaskManager, UserIntent
+from main import InterruptAction, TalkerThinkerApp, TaskManager, UserIntent
 from agents.llm_client import MockLLMClient
 from agents.talker.agent import TalkerAgent
 from agents.thinker.agent import ThinkerAgent
@@ -82,6 +82,22 @@ class TestP0IntentHandling:
     def test_extract_replacement_input(self):
         manager = TaskManager()
         replacement = manager.extract_replacement_input("不想打车了，定个餐馆")
+        assert replacement == "定个餐馆"
+
+    def test_interrupt_action_cancel_only(self):
+        manager = TaskManager()
+        manager._is_processing = True
+        manager._current_input = "帮我对比家具"
+        action, replacement = manager.decide_interrupt_action("不买家具了")
+        assert action == InterruptAction.CANCEL_ONLY
+        assert replacement is None
+
+    def test_interrupt_action_replace_with_new_task(self):
+        manager = TaskManager()
+        manager._is_processing = True
+        manager._current_input = "帮我对比家具"
+        action, replacement = manager.decide_interrupt_action("不买家具了，定个餐馆")
+        assert action == InterruptAction.REPLACE_WITH_NEW_TASK
         assert replacement == "定个餐馆"
 
     @pytest.mark.asyncio
@@ -172,6 +188,44 @@ class TestP1SharedContextFlow:
         orchestrator = self._create_orchestrator()
         prefs = orchestrator._extract_user_preferences("我喜欢吃辣，重口味一点")
         assert prefs.get("taste") == "喜欢吃辣"
+
+    @pytest.mark.asyncio
+    async def test_persist_user_preferences_budget(self):
+        orchestrator = self._create_orchestrator()
+        prefs = await orchestrator.persist_user_preferences("预算20万，喜欢SUV")
+        assert prefs.get("budget") == "20万"
+        assert "SUV" in prefs.get("car_type", "")
+
+    def test_extract_user_preferences_generic_model(self):
+        orchestrator = self._create_orchestrator()
+        prefs = orchestrator._extract_user_preferences("我喜欢安静一点，不要太吵，希望离地铁近")
+        assert "likes" in prefs
+        assert "dislikes" in prefs
+        assert "constraints" in prefs
+
+    def test_merge_user_preferences_list_dedup(self):
+        orchestrator = self._create_orchestrator()
+        merged = orchestrator._merge_user_preferences(
+            {"likes": ["安静", "便宜"], "taste": "喜欢吃辣"},
+            {"likes": ["便宜", "地铁近"], "constraints": ["周末"]},
+        )
+        assert merged["likes"] == ["安静", "便宜", "地铁近"]
+        assert merged["constraints"] == ["周末"]
+        assert merged["taste"] == "喜欢吃辣"
+
+    def test_should_broadcast_no_progress_then_heartbeat(self):
+        orchestrator = self._create_orchestrator()
+        orchestrator._progress_state.last_content_hash = "analyzing:0:0:"
+        orchestrator._progress_state.last_broadcast = __import__("time").time()
+
+        should, reason = orchestrator._should_broadcast(
+            new_stage=orchestrator._progress_state.current_stage,
+            current_step=0,
+            elapsed_time=10,
+            content_hash="analyzing:0:0:",
+        )
+        assert should is False
+        assert reason == "no_progress"
 
     @pytest.mark.asyncio
     async def test_precheck_timeout_falls_back_to_thinker(self):

@@ -192,6 +192,60 @@ Talker持续播报“仍在分析/核对条件/即将推理...”
 3. 立即进入 Thinker 主处理，避免“无限前置播报”。  
 4. 增加回归测试 `test_precheck_timeout_falls_back_to_thinker`，确保超时后仍会输出 `Thinker: 开始处理`。
 
+## 2026-02-20 会话F：P0打断状态机落地
+
+### 改动摘要
+1. 在 `TaskManager` 增加中断动作决策：  
+   - `CANCEL_ONLY`  
+   - `MODIFY_CURRENT`  
+   - `REPLACE_WITH_NEW_TASK`
+2. 在 `_handle_new_input_during_processing` 中接入该决策：  
+   - 纯取消（如“不买家具了”）只取消，不自动重启新任务。  
+   - 取消+新任务（如“不买家具了，定个餐馆”）取消后自动切换新任务。
+
+### 新增测试
+- `test_interrupt_action_cancel_only`
+- `test_interrupt_action_replace_with_new_task`
+
+## 2026-02-20 会话G：P0播报质量与记忆召回补强
+
+### 本轮优化
+1. **播报质量**  
+   - 协作播报新增“无进展抑制”：内容哈希不变且距离上次播报不足15秒时不重复播报。  
+   - 保留“心跳播报”通道：长时间无进展时按阶段输出低频心跳，避免刷屏。
+
+2. **跨会话记忆召回**  
+   - 偏好提取扩展：支持口味、预算（如`20万`）、车型偏好（SUV/轿车）。  
+   - 补充信息路径（MODIFY）也会触发偏好持久化，避免只在新请求时写入记忆。
+
+### 新增测试
+- `test_persist_user_preferences_budget`
+- `test_should_broadcast_no_progress_then_heartbeat`
+
+## 2026-02-20 会话H：通用记忆建模优化
+
+### 问题
+此前记忆提取主要依赖场景词（口味/预算/车型），泛化能力有限，难覆盖不同任务域。
+
+### 本轮改进
+1. 记忆提取从“场景硬编码”升级为“通用槽位建模”：  
+   - `likes`（偏好项）  
+   - `dislikes`（规避项）  
+   - `constraints`（约束项）  
+2. 保留高频兼容字段：`taste`、`budget`、`car_type`。  
+3. 增加记忆合并策略：  
+   - 列表字段去重并保序（避免覆盖历史偏好）  
+   - 字典字段递归覆盖  
+   - 标量字段按最新输入更新
+
+### 价值
+- 记忆能力不再强绑定单一场景，可迁移到餐饮、出行、购物、学习等不同任务域。  
+- 用户多轮补充信息能形成逐步累积画像，而不是每轮重写。
+
+### 新增测试
+- `test_extract_user_preferences_generic_model`
+- `test_merge_user_preferences_list_dedup`
+
 ## 2026-02-20 历史交互综合复盘（问题分类 + 优化方向 + 优先级）
 
 ### 一、核心问题分类（5大类）
