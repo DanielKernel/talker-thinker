@@ -1518,20 +1518,16 @@ class Orchestrator:
                         # 重置 heartbeat 计时器，避免重复播报
                         last_broadcast_time = current_time
 
-                        if not thinker_first_token_shown:
-                            ts = format_timestamp(current_time)
-                            yield f"\n[{ts}] Talker: "
-                            thinker_first_token_shown = True
-                        yield talker_rewrite
+                        # 每个阶段标记都作为独立的消息显示，带有自己的时间戳和 Talker 前缀
+                        ts = format_timestamp(current_time)
+                        yield f"\n[{ts}] Talker: {talker_rewrite}"
                     else:
                         # 非阶段标记输出，使用 Talker 风格播报
                         # 根据内容判断是否需要特殊处理
                         if chunk.strip() and not chunk.startswith('[答案]'):
                             # 普通内容，使用通用的 Talker 播报
-                            if not thinker_first_token_shown:
-                                ts = format_timestamp(current_time)
-                                yield f"\n[{ts}] Talker: "
-                                thinker_first_token_shown = True
+                            ts = format_timestamp(current_time)
+                            yield f"\n[{ts}] Talker: "
                             # 短内容直接显示，长内容截断
                             if len(chunk.strip()) > 50:
                                 yield f"{chunk.strip()[:50]}..."
@@ -1539,10 +1535,9 @@ class Orchestrator:
                                 yield chunk.strip()
                         else:
                             # 答案内容或空内容，直接显示
-                            if not thinker_first_token_shown and chunk.strip():
+                            if chunk.strip():
                                 ts = format_timestamp(current_time)
                                 yield f"\n[{ts}] Talker: "
-                                thinker_first_token_shown = True
                             yield chunk
             else:
                 # 没有新输出时短暂等待
@@ -1553,12 +1548,8 @@ class Orchestrator:
             chunk = thinker_output[output_index]
             output_index += 1
             if chunk.strip():
-                if not thinker_first_token_shown:
-                    ts = format_timestamp(time.time())
-                    yield f"\n[{ts}] Talker: "
-                    thinker_first_token_shown = True
-                # 所有输出都通过 Talker 播报，不直接暴露 Thinker 内容
-                yield chunk
+                ts = format_timestamp(time.time())
+                yield f"\n[{ts}] Talker: {chunk}"
 
         # 记录Handoff回Talker
         self._record_handoff(

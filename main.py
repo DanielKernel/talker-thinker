@@ -908,8 +908,16 @@ class TalkerThinkerApp:
                     while not output_complete_event.is_set():
                         await asyncio.sleep(0.1)
 
+                    # 再次检查事件，避免在等待期间被清除
+                    if not output_complete_event.is_set():
+                        continue
+
                     # 使用 prompt_toolkit 获取输入（支持中文编辑）
                     line = await loop.run_in_executor(None, input_handler.get_input, session_id)
+
+                    # 获取到输入后，立即清除事件，防止在输出过程中显示下一个输入提示
+                    output_complete_event.clear()
+
                     await input_queue.put(line)
                 except EOFError:
                     logger.info("Input EOF, exiting read_input loop")
@@ -968,6 +976,8 @@ class TalkerThinkerApp:
                             # 任务已处理（如查询状态），显示响应
                             if response:
                                 print(response)
+                            # 显示响应后，设置事件允许显示下一个输入提示
+                            output_complete_event.set()
                             continue
                         # 否则，继续处理新输入
 
@@ -995,8 +1005,7 @@ class TalkerThinkerApp:
                             )
                             # 有新输入，处理打断逻辑
                             if new_input.strip():
-                                # 1. 先处理获取响应，不立即显示用户输入
-                                #    prompt_toolkit 已经显示了输入提示，这里只需要处理逻辑
+                                # 1. 先处理获取响应
                                 handled, response = await self._handle_new_input_during_processing(
                                     new_input, session_id
                                 )
@@ -1005,8 +1014,10 @@ class TalkerThinkerApp:
                                 if handled:
                                     if response:
                                         print(response)
+                                    # 显示响应后，设置事件允许显示下一个输入提示
+                                    output_complete_event.set()
                                 else:
-                                    # 需要处理新任务
+                                    # 需要处理新任务，保持事件清除状态
                                     pending_new_input = (
                                         self.task_manager.pending_replacement_input
                                         or new_input.strip()
@@ -1038,6 +1049,8 @@ class TalkerThinkerApp:
                                 pass
                             self.task_manager.end_task()
                             print()
+                            # 新任务完成后，设置事件允许显示下一个输入提示
+                            output_complete_event.set()
                     else:
                         # 被打断，处理新任务
                         self.task_manager._cancelled = False
@@ -1051,6 +1064,9 @@ class TalkerThinkerApp:
                         except asyncio.CancelledError:
                             pass
                         self.task_manager.end_task()
+                        print()
+                        # 新任务完成后，设置事件允许显示下一个输入提示
+                        output_complete_event.set()
 
                         # 检查是否有队列中的任务需要处理
                         next_task = self.task_manager.task_queue.start_next()
@@ -1062,7 +1078,6 @@ class TalkerThinkerApp:
                             ))
                             # Add error handling for the background task
                             task.add_done_callback(lambda t: self._handle_background_task_error(t))
-                        print()
 
                 except KeyboardInterrupt:
                     # Ctrl+C 处理
