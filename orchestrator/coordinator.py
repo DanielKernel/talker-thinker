@@ -52,6 +52,7 @@ class ProgressState:
     broadcast_history: set = field(default_factory=set)
     last_content_hash: str = ""
     used_message_templates: Dict[str, set] = field(default_factory=dict)  # 按阶段记录已使用的消息模板
+    recent_message_fingerprints: List[str] = field(default_factory=list)  # 最近消息指纹（用于语义去重）
 
 
 @dataclass
@@ -209,6 +210,36 @@ class Orchestrator:
         desc = (partials[-1] or "").strip()
         return desc[:30]
 
+
+    def _is_semantic_duplicate(self, message_text: str) -> bool:
+        """检测消息是否为语义重复"""
+        # 计算消息的语义指纹（基于关键词）
+        keywords = self._extract_semantic_keywords(message_text)
+        fingerprint = f"{self._progress_state.current_stage.value}:{keywords}"
+
+        # 检查最近 N 条消息
+        recent_fingerprints = self._progress_state.recent_message_fingerprints[-5:]
+        if fingerprint in recent_fingerprints:
+            return True
+
+        # 添加新指纹
+        self._progress_state.recent_message_fingerprints.append(fingerprint)
+        # 限制列表长度
+        if len(self._progress_state.recent_message_fingerprints) > 10:
+            self._progress_state.recent_message_fingerprints = self._progress_state.recent_message_fingerprints[-10:]
+        return False
+
+    def _extract_semantic_keywords(self, text: str) -> str:
+        """提取消息的语义关键词"""
+        # 移除时间戳、进度条等变量
+        text = re.sub(r'\d+s', '', text)
+        text = re.sub(r'\[.+?\]', '', text)
+        text = re.sub(r'[░█\d%]', '', text)
+
+        # 保留核心动词和名词
+        keywords = re.findall(r'[整合 | 分析 | 规划 | 执行 | 检查 | 优化 | 答案 | 结果 | 步骤]', text)
+        return ''.join(sorted(set(keywords)))
+
     def _generate_stage_broadcast(
         self,
         stage: ThinkerStage,
@@ -338,20 +369,119 @@ class Orchestrator:
             return f"{template}...", template
 
         elif stage == ThinkerStage.SYNTHESIZING:
-            templates = [
-                "正在整合分析结果",
-                "生成最终答案中",
-                "即将完成，请稍候",
-                "整理输出内容",
-            ]
-            template = get_unused_template(templates, used_templates)
-            return f"{template}...", template
+            # 按时间顺序使用不同模板，避免随机选择导致重复
+            if elapsed_time < 10:
+                templates = ["正在整合分析结果，请稍候..."]
+            elif elapsed_time < 20:
+                templates = ["正在整理最终答案..."]
+            elif elapsed_time < 30:
+                templates = ["即将完成，正在进行质量检查..."]
+            else:
+                templates = ["正在优化答案，感谢耐心等待..."]
+
+            # 使用时间分段选择模板
+            elapsed_bucket = int(elapsed_time // 10)
+            template = templates[elapsed_bucket % len(templates)]
+            return template, f"synthesize_bucket_{elapsed_bucket}"
 
         elif stage == ThinkerStage.COMPLETED:
             return "处理完成！", "处理完成"
 
         # 默认消息
         return f"处理中 ({elapsed_time:.0f}s)...", "处理中"
+
+    def _is_silent_marker(self, chunk: str) -> bool:
+        """检测是否为应静默处理的标记"""
+        silent_patterns = [
+            r'✓\s*完成\s*\(\d+ms\)',
+            r'✓\s*已验证',
+            r'^[-=]{3,}',
+            r'执行进度\s*:',
+        ]
+        return any(re.match(p, chunk.strip()) for p in silent_patterns)
+
+    def _try_rewrite_step_marker(self, chunk: str, total_steps: int) -> Optional[str]:
+        """统一处理步骤标记"""
+        # 匹配步骤标记：[步骤 X] 描述... 或 [步骤 X] 描述
+        match = re.match(r'\[步骤 (\d+)\] (.+?)\.\.\.', chunk.strip())
+        if match and total_steps > 0:
+            step_num = int(match.group(1))
+            step_name = match.group(2).strip()
+            progress_pct = int((step_num / total_steps) * 100)
+            return f"步骤{step_num}/{total_steps}: {step_name} ({progress_pct}%)"
+
+        # 无省略号的变体
+        match = re.match(r'\[步骤 (\d+)\] (.+)', chunk.strip())
+        if match and total_steps > 0:
+            step_num = int(match.group(1))
+            step_name = match.group(2).strip()
+            progress_pct = int((step_num / total_steps) * 100)
+            return f"步骤{step_num}/{total_steps}: {step_name} ({progress_pct}%)"
+
+        return None
+
+    def _try_rewrite_synthesize_marker(self, chunk: str) -> Optional[str]:
+        """统一处理整合/答案相关标记 - 使用映射表避免重复"""
+        synthesize_map = {
+            # 精确匹配优先
+            ("整合", "答案"): "即将完成，正在整合答案...",
+            ("整合结果", "最终答案"): "即将完成，正在整理最终答案...",
+            # 通用模式
+            ("整合", None): "正在整合内容，请稍候...",
+            ("检查", "质量"): "正在进行质量检查...",
+            ("优化", "答案"): "正在优化答案，请稍候...",
+        }
+
+        for (k1, k2), rewrite in synthesize_map.items():
+            if k1 in chunk and (k2 is None or k2 in chunk):
+                return rewrite
+        return None
+
+    def _try_rewrite_thinking_marker(self, chunk, stage, current_step, total_steps) -> Optional[str]:
+        """处理思考/规划/分析标记"""
+        chunk_stripped = chunk.strip()
+
+        # [思考] 正在 xxx...（支持中文括号）
+        thinking_match = re.match(r'\[思考\]\s*(.+)\.\.\.', chunk_stripped)
+        if thinking_match:
+            action = thinking_match.group(1)
+            # 根据阶段给出更友好的描述
+            if stage == ThinkerStage.ANALYZING:
+                return f"正在{action}，请稍候..."
+            elif stage == ThinkerStage.PLANNING:
+                return f"已理解需求，{action}..."
+            elif stage == ThinkerStage.EXECUTING:
+                return f"{action}，进度{current_step}/{total_steps}..."
+            else:
+                return f"正在{action}..."
+
+        # [思考] 没有省略号的变体
+        thinking_no_dots = re.match(r'\[思考\]\s*(.+)', chunk_stripped)
+        if thinking_no_dots and '...' not in chunk_stripped:
+            action = thinking_no_dots.group(1).strip()
+            return f"正在{action}，请稍候..."
+
+        # [规划] 任务目标：xxx
+        plan_target_match = re.match(r'\[规划\]\s*任务目标:\s*(.+)', chunk_stripped)
+        if plan_target_match:
+            target = plan_target_match.group(1)
+            return f"已理解任务目标：{target}"
+
+        # [规划] 共 X 个步骤
+        plan_steps_match = re.match(r'\[规划\]\s*共\s*(\d+)\s*个步骤', chunk_stripped)
+        if plan_steps_match:
+            num_steps = int(plan_steps_match.group(1))
+            return f"任务已分解为{num_steps}个步骤，开始执行..."
+
+        # [规划] 通用模式
+        if chunk_stripped.startswith("[规划]") or chunk_stripped.startswith("［规划］"):
+            return "正在规划任务执行方案..."
+
+        # [分析] 通用模式
+        if chunk_stripped.startswith("[分析]") or chunk_stripped.startswith("［分析］"):
+            return "正在分析问题，请稍候..."
+
+        return None
 
     def _try_rewrite_thinker_output(
         self,
@@ -368,33 +498,30 @@ class Orchestrator:
         检测 Thinker 输出的阶段标记（如"[步骤 1] xxx"、"[思考] xxx"、"[规划] xxx"），
         由 Talker 重新组织语言后显示，使用户感知更一致、更友好。
 
-        关键改进：
-        1. 过滤无意义的中间标记（如"✓ 完成 (Xms)"）
-        2. 去重处理，避免重复内容播报
-        3. 根据阶段和进度生成更合适的播报
+        优先级重写规则：
+        1. 静默处理（无意义标记）
+        2. 步骤标记（最具体，优先匹配）
+        3. 整合/答案标记（使用统一映射表）
+        4. 思考/规划/分析标记
 
         Returns:
             Optional[str]: 如果检测到阶段标记则返回重写后的播报，否则返回 None
         """
         chunk_stripped = chunk.strip()
 
-        # === 过滤无意义的中间标记（静默处理）===
-
-        # ✓ 完成 (Xms) - 步骤完成标记，静默处理
-        if re.match(r'✓\s*完成\s*\((\d+)ms\)', chunk_stripped):
+        # 优先级 1: 静默处理（无意义标记）
+        if self._is_silent_marker(chunk_stripped):
             return None
 
-        # ✓ 已验证 xxx - 验证标记，静默处理
-        if re.match(r'✓\s*已验证', chunk_stripped):
-            return None
+        # 优先级 2: 步骤标记（最具体，优先匹配）
+        rewrite = self._try_rewrite_step_marker(chunk_stripped, total_steps)
+        if rewrite:
+            return rewrite
 
-        # --- 分隔线类输出，静默处理
-        if chunk_stripped.startswith('---') or chunk_stripped.startswith('==='):
-            return None
-
-        # 进度报告类（Thinker 内部日志），静默处理
-        if '执行进度' in chunk_stripped and ':' in chunk_stripped:
-            return None
+        # 优先级 3: 整合/答案标记（使用统一映射表）
+        rewrite = self._try_rewrite_synthesize_marker(chunk_stripped)
+        if rewrite:
+            return rewrite
 
         # 空白字符容错：移除所有空白字符后再匹配
         normalized = re.sub(r'\s+', '', chunk_stripped)
@@ -525,6 +652,98 @@ class Orchestrator:
         # 未检测到阶段标记，返回 None 让原始输出显示
         return None
 
+
+    def _try_rewrite_thinker_output(
+        self,
+        chunk: str,
+        stage: ThinkerStage,
+        current_step: int,
+        total_steps: int,
+        step_desc: str,
+        elapsed: float,
+    ) -> Optional[str]:
+        """
+        尝试将 Thinker 的阶段标记输出转换为 Talker 风格的播报
+
+        检测 Thinker 输出的阶段标记（如"[步骤 1] xxx"、"[思考] xxx"、"[规划] xxx"），
+        由 Talker 重新组织语言后显示，使用户感知更一致、更友好。
+
+        优先级重写规则：
+        1. 静默处理（无意义标记）
+        2. 步骤标记（最具体，优先匹配）
+        3. 整合/答案标记（使用统一映射表）
+        4. 思考/规划/分析标记
+
+        Returns:
+            Optional[str]: 如果检测到阶段标记则返回重写后的播报，否则返回 None
+        """
+        chunk_stripped = chunk.strip()
+
+        # 优先级 1: 静默处理（无意义标记）
+        if self._is_silent_marker(chunk_stripped):
+            return None
+
+        # 优先级 2: 步骤标记（最具体，优先匹配）
+        rewrite = self._try_rewrite_step_marker(chunk_stripped, total_steps)
+        if rewrite:
+            return rewrite
+
+        # 优先级 3: 整合/答案标记（使用统一映射表）
+        rewrite = self._try_rewrite_synthesize_marker(chunk_stripped)
+        if rewrite:
+            return rewrite
+
+        # 空白字符容错：移除所有空白字符后再匹配
+        normalized = re.sub(r'\s+', '', chunk_stripped)
+
+        # === 其他模式匹配 ===
+
+        # "开始处理..." → 已启动（支持多种变体）
+        if chunk_stripped.startswith("开始处理") or re.search(r'开始\s*处理', chunk_stripped) or '开始处理' in normalized:
+            return "已启动，正在分析您的问题..."
+
+        # "开始 xxx..." 通用模式
+        if chunk_stripped.startswith("开始") and "..." in chunk_stripped:
+            action = chunk_stripped[2:].split('.')[0].strip()
+            return f"开始{action}，请稍候..."
+
+        # "正在 xxx..." → 正在 xxx，请稍候...（支持更宽松的检测）
+        if chunk_stripped.startswith("正在") and "..." in chunk_stripped:
+            return f"{chunk_stripped}请稍候..."
+
+        # "正在 xxx" 没有省略号的变体
+        if chunk_stripped.startswith("正在") and len(chunk_stripped) > 4:
+            return f"{chunk_stripped}，请稍候..."
+
+        # 优先级 4: 思考/规划/分析标记
+        rewrite = self._try_rewrite_thinking_marker(chunk_stripped, stage, current_step, total_steps)
+        if rewrite:
+            return rewrite
+
+        # [答案] xxx - 最终答案，静默处理，由后续逻辑处理
+        answer_match = re.match(r'[\[［] 答案 [\]］]\s*(.+)', chunk_stripped)
+        if answer_match:
+            # 最终答案内容，返回 None 让正常流程处理
+            return None
+
+        # 通用阶段标记处理 - fallback 机制
+        # 检查是否是 Thinker 的阶段标记格式：[阶段名] 内容
+        stage_marker_match = re.match(r'[\[［](步骤 | 思考 | 规划 | 分析 | 执行 | 整合 | 答案)[\]］]\s*(.+)', chunk_stripped)
+        if stage_marker_match:
+            # 通用的阶段标记处理
+            return "正在处理中，请稍候..."
+
+        # 空白字符容错检测：对于短内容，使用 normalized 再次检测
+        if len(normalized) < 20:
+            if '开始处理' in normalized:
+                return "已启动，正在分析您的问题..."
+            if '正在分析' in normalized:
+                return "正在分析问题，请稍候..."
+            if '整合答案' in normalized:
+                return "即将完成，正在整合答案..."
+
+        # 未检测到阶段标记，返回 None 让原始输出显示
+        return None
 
 
     def _format_progress_bar(self, current: int, total: int, width: int = 20) -> str:
@@ -678,6 +897,7 @@ class Orchestrator:
         current_step: int,
         elapsed_time: float,
         content_hash: str,
+        message_text: str = "",  # 新增：待播报的消息文本
         force_check: bool = False,
     ) -> tuple[bool, str]:
         """
@@ -687,6 +907,7 @@ class Orchestrator:
             new_stage: 当前阶段
             current_step: 当前步骤
             elapsed_time: 已耗时
+            message_text: 待播报的消息文本（用于语义去重）
             force_check: 是否强制检查（忽略最小间隔）
 
         Returns:
@@ -708,6 +929,11 @@ class Orchestrator:
             if current_time - state.last_broadcast < 15:
                 return False, "no_progress"
             return True, "heartbeat"
+
+
+        # 语义去重检查
+        if message_text and self._is_semantic_duplicate(message_text):
+            return False, "semantic_duplicate"
 
         # 检查该阶段已使用的模板数量
         stage_key = new_stage.value
@@ -1373,6 +1599,12 @@ class Orchestrator:
                         # 且 Thinker 输出是"开始处理"，则跳过劫持（静默处理）
                         if precheck_timeout_broadcast and "Thinker 已启动" in talker_rewrite:
                             # 静默处理，不重复播报，但重置 heartbeat 计时器
+                            last_broadcast_time = current_time
+                            continue
+
+                        # 语义去重检查：如果与最近播报重复，则跳过
+                        if self._is_semantic_duplicate(talker_rewrite):
+                            # 跳过播报，但重置计时器
                             last_broadcast_time = current_time
                             continue
 
