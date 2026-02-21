@@ -13,12 +13,16 @@ from typing import Optional
 from typing import Any, Dict, Optional
 
 from config import settings
+from config.keywords_manager import get_keywords_manager
 from orchestrator.coordinator import Orchestrator
 from context.shared_context import TaskQueue, TaskInfo
 from monitoring.logging import get_logger
 from monitoring.metrics import get_metrics_collector
 
 logger = get_logger("main")
+
+# Initialize keywords manager
+_keywords_manager = get_keywords_manager()
 
 
 
@@ -33,37 +37,7 @@ def detect_user_emotion(text: str) -> str:
     Returns:
         情绪标签：'complaint'（抱怨）、'neutral'（中性）、'positive'（正面）、'negative'（负面）
     """
-    text_lower = text.lower().strip()
-
-    # 抱怨/不满情绪
-    complaint_patterns = [
-        "太慢", "好慢", "慢死了", "太久了", "等了好久", "怎么这么慢",
-        "太乱", "好乱", "乱七八糟", "听不懂", "不明白",
-        "没用", "不行", "不好", "太差了", "真差",
-        "你在干啥", "你在干嘛", "怎么没反应", "没回应",
-    ]
-    if any(p in text_lower for p in complaint_patterns):
-        return "complaint"
-
-    # 负面情绪（失望、放弃）
-    negative_patterns = [
-        "算了", "不要了", "不用了", "不弄了", "不搞了",
-        "失望", "无语", "唉", "哎",
-    ]
-    if any(p in text_lower for p in negative_patterns):
-        return "negative"
-
-    # 正面情绪
-    positive_patterns = [
-        "太好了", "很好", "不错", "挺好", "真棒", "厉害",
-        "谢谢", "感谢", "辛苦了", "好的", "好的谢谢",
-        "哈哈", "嘻嘻", "笑死", "有趣",
-    ]
-    if any(p in text_lower for p in positive_patterns):
-        return "positive"
-
-    # 默认中性
-    return "neutral"
+    return _keywords_manager.detect_emotion(text)
 
 
 class UserIntent(Enum):
@@ -102,17 +76,7 @@ class TaskManager:
         self._pending_replacement_input: Optional[str] = None
         # 多任务队列支持
         self.task_queue = TaskQueue()
-        # 话题库
-        self._topic_keywords = {
-            "选车": ["车", "汽车", "买车", "选车", "suv", "轿车", "新能源车", "车型", "品牌"],
-            "打车": ["打车", "滴滴", "高德", "taxi", "专车", "快车", "叫车"],
-            "咖啡": ["咖啡", "拿铁", "星巴克", "瑞幸"],
-            "美食": ["餐厅", "美食", "吃的", "推荐菜", "吃饭", "吃", "餐馆", "菜"],
-            "家具": ["家具", "沙发", "床", "桌子", "椅子", "家居"],
-            "应用": ["app", "软件", "应用", "平台"],
-            "购物": ["买", "购物", "价格", "便宜", "对比"],
-            "旅游": ["旅游", "景点", "酒店", "机票", "旅行"],
-        }
+        # 使用 KeywordsManager 获取话题库，不再 hardcode
 
     @property
     def is_processing(self) -> bool:
@@ -256,22 +220,12 @@ class TaskManager:
 
         # === 0. 最高优先级：明确的取消/替换关键词 ===
         # 必须在最前面，否则会被其他规则捕获
-        cancel_keywords = [
-            "取消", "停止", "停", "算了", "不用了", "不要了",
-            "不看了", "不做了", "换个", "重新", "不定", "不买了",
-            "不买", "不需要了", "先不用", "先不", "不用买",
-            "stop", "cancel", "never mind", "forget it",
-        ]
-        if any(kw in text for kw in cancel_keywords):
+        if _keywords_manager.has_intent_keyword(text, "cancel"):
             return UserIntent.REPLACE
 
         # === 0.05 明确补充信息（优先于新任务）===
         # 避免"帮我补充..."被误判为新任务替换
-        modify_keywords = [
-            "另外", "还有", "加上", "补充", "再加", "也要",
-            "或者", "改为", "换成", "最好是", "注意", "顺便",
-            "并且", "同时", "补充下", "补充一下",
-        ]
+        modify_keywords = _keywords_manager.get_intent_keywords("modify")
         # 但"还有任务吗"、"还有多少任务"是查询状态，不是补充信息
         status_exceptions = ["还有任务", "还有多少", "还有几个"]
         if any(se in text for se in status_exceptions):
@@ -280,48 +234,25 @@ class TaskManager:
             return UserIntent.MODIFY
 
         # === 0.06 上下文补充短句（优先于新任务）===
-        contextual_markers = [
-            "对比", "关于", "就是", "比如", "例如", "这个", "那个", "app", "软件", "平台", "家具",
-        ]
-        explicit_new_task_markers = ["我要", "我想", "帮我", "给我", "请", "麻烦", "定个", "订个"]
+        contextual_markers = _keywords_manager.get_intent_keywords("contextual")
+        explicit_new_task_markers = _keywords_manager.get_intent_keywords("new_task")
         if len(text) <= 14 and any(m in text for m in contextual_markers):
             if not any(m in text for m in explicit_new_task_markers):
                 return UserIntent.MODIFY
 
         # === 0.1 显式新任务（高优先级）===
-        explicit_new_task_phrases = [
-            "我要", "我想", "帮我", "给我", "麻烦", "请你", "请帮", "重新帮我",
-            "定个", "订个", "改成", "改查", "换成",
-        ]
-        if any(phrase in text for phrase in explicit_new_task_phrases):
-            return UserIntent.REPLACE
+        # 已合并到 new_task 意图检测中
 
         # === 0.2 话题切换检测 ===
         if self._is_topic_switch(new_input):
             return UserIntent.REPLACE
 
         # === 1. 检测用户在等待中的疑问/抱怨 ===
-        waiting_questions = [
-            "有人在", "在吗", "在不在", "人呢", "还在吗",
-            "太慢", "好慢", "怎么这么慢", "等好久了", "有点慢",
-            "好了吗", "怎么样了", "完成没", "进度",
-            "有啥信息", "有结果没", "有什么进展", "进展咋样", "信息没",
-            "没回应", "没反应", "不回应", "不反应",
-            "你在干啥", "你在干嘛", "分析啥", "在做什么",
-            "有任务", "还有任务", "多少任务", "几个任务",
-            "还在处理", "还在做", "还在弄",
-        ]
-        if any(q in text for q in waiting_questions):
+        if _keywords_manager.has_intent_keyword(text, "query_status"):
             return UserIntent.QUERY_STATUS
 
         # === 2. 检测附和/应答（不打断任务）===
-        backchannel_patterns = [
-            "嗯", "嗯嗯", "好的", "好", "行", "可以", "对", "是",
-            "ok", "okay", "yes", "right", "明白", "了解", "收到",
-        ]
-        # 注意：只有明确是附和词才返回 BACKCHANNEL
-        # 不再用 len(text)<=2 来判断，因为"取消"也是 2 个字
-        if text in backchannel_patterns:
+        if _keywords_manager.has_intent_keyword(text, "backchannel"):
             return UserIntent.BACKCHANNEL
 
         # === 2.1 短文本新任务检测（避免"吃饭"被误判）===
@@ -329,54 +260,30 @@ class TaskManager:
             return UserIntent.REPLACE
 
         # === 3. 检测评论/感叹（不打断任务） ===
-        comment_patterns = [
-            "不错", "很好", "太好了", "厉害", "赞", "可以啊",
-            "挺好", "还行", "好的呀", "是吗", "真的吗",
-            "interesting", "cool", "nice", "good", "great",
-        ]
-        if any(pattern in text for pattern in comment_patterns):
+        if _keywords_manager.has_intent_keyword(text, "comment"):
             question_patterns = ["吗", "？", "?", "呢", "什么", "怎么", "如何", "为什么"]
             if not any(q in text for q in question_patterns):
                 return UserIntent.COMMENT
 
         # === 4. 查询状态 ===
-        status_keywords = [
-            "进度", "怎么样", "好了吗", "完成没", "状态", "多久",
-            "还在吗", "到哪了", "在不在",
-        ]
-        if any(kw in text for kw in status_keywords):
-            return UserIntent.QUERY_STATUS
+        # 已合并到 query_status 检测中
 
         # === 5. 暂停/恢复关键词 ===
-        pause_keywords = ["暂停", "等一下", "稍等", "等会", "先停", "pause"]
-        if any(kw in text for kw in pause_keywords):
+        if _keywords_manager.has_intent_keyword(text, "pause"):
             return UserIntent.PAUSE
 
-        resume_keywords = ["继续", "恢复", "接着", "resume", "continue", "go on"]
-        if any(kw in text for kw in resume_keywords):
+        if _keywords_manager.has_intent_keyword(text, "resume"):
             return UserIntent.RESUME
 
         # === 6. 检查是否是全新的任务请求（需要打断）===
-        # 注意：话题切换已经在前面的步骤检测了，这里只处理同类话题内的新请求
-        new_task_indicators = [
-            "我要", "帮我", "给我", "推荐", "分析", "比较", "查一下",
-            "选", "买", "找", "看", "订", "定", "吃", "点餐",
-        ]
-        if any(q in text for q in new_task_indicators):
-            # 如果包含明确的任务词且长度足够，认为是新任务
-            if len(text) >= 4:
-                return UserIntent.REPLACE
+        # 已合并到 new_task 检测中
 
         # === 7. 补充/修改信息的关键词 ===
-        if any(kw in text for kw in modify_keywords):
-            return UserIntent.MODIFY
+        # 已合并到 modify 检测中
 
         # === 8. 回答澄清问题 ===
         # 注意：先检测评论/感叹，避免"挺好的"被误判为澄清回答
-        clarify_keywords = [
-            "是", "对", "要", "大概", "左右",
-            "万", "块", "元", "预算", "北京", "上海", "广州", "深圳",
-        ]
+        clarify_keywords = _keywords_manager.get_intent_keywords("clarify")
         # 澄清回答通常是单个确认词，且不包含评论词
         comment_words = ["好", "不错", "行", "可以", "挺", "真", "太"]
         is_comment = any(cw in text for cw in comment_words)
@@ -391,13 +298,12 @@ class TaskManager:
         chunks = [c.strip() for c in re.split(r"[，,。；;！!？?]", text) if c.strip()]
         if not chunks:
             return text
-        new_task_markers = [
-            "我要", "我想", "帮我", "给我", "请", "麻烦", "定", "订", "推荐", "查", "分析", "比较", "找",
-            "餐馆", "吃饭", "打车", "选车", "买车",
-        ]
+        # 使用 KeywordsManager 获取新任务关键词
+        new_task_markers = _keywords_manager.get_intent_keywords("new_task")
+        cancel_keywords = _keywords_manager.get_intent_keywords("cancel")
         for chunk in chunks:
             if any(m in chunk for m in new_task_markers):
-                if not any(k in chunk for k in ["取消", "不用", "不想", "算了", "停止"]):
+                if not any(k in chunk for k in cancel_keywords):
                     return chunk
         return text
 
@@ -414,9 +320,9 @@ class TaskManager:
             return InterruptAction.CONTINUE, None
 
         replacement = self.extract_replacement_input(text)
-        cancel_keywords = ["取消", "停止", "算了", "不用", "不买", "不定", "不需要", "先不", "forget it", "cancel"]
+        cancel_keywords = _keywords_manager.get_intent_keywords("cancel")
         has_cancel = any(k in text.lower() for k in cancel_keywords)
-        has_new_task_phrase = any(k in text for k in ["我要", "我想", "帮我", "给我", "定个", "订个", "换成", "改查", "改成"])
+        has_new_task_phrase = _keywords_manager.has_intent_keyword(text, "new_task")
 
         if replacement != text or has_new_task_phrase:
             return InterruptAction.REPLACE_WITH_NEW_TASK, replacement
@@ -429,10 +335,11 @@ class TaskManager:
         current_topic = self._current_topic or self._extract_topic(self._current_input or "")
         new_topic = self._extract_topic(text)
 
-        action_keywords = [
-            "买", "选", "推荐", "分析", "比较", "查", "找", "看", "订", "定",
-            "吃", "安排", "规划", "预订", "打车", "叫车", "叫个",
-        ]
+        # 使用 KeywordsManager 获取动作词
+        all_intent_keywords = []
+        for intent_type in ["new_task", "modify", "cancel"]:
+            all_intent_keywords.extend(_keywords_manager.get_intent_keywords(intent_type))
+        action_keywords = list(set(all_intent_keywords))
 
         has_action = any(kw in text for kw in action_keywords)
 
@@ -522,15 +429,20 @@ class TaskManager:
 
     def _extract_topic(self, text: str) -> Optional[str]:
         """提取话题关键词"""
+        # 首先使用 KeywordsManager 提取话题
+        topic = _keywords_manager.extract_topic(text)
+        if topic:
+            return topic
+
         text_lower = text.lower()
-        for topic, keywords in self._topic_keywords.items():
-            if any(kw in text_lower for kw in keywords):
-                return topic
+
         # 过滤掉纯评论/附和的短语
-        comment_phrases = ["挺好的", "非常好", "太好了", "还可以", "挺好的呀", "不错啊", "真的吗", "是吗", "不错", "挺好", "还行", "好"]
-        backchannel_phrases = ["好的", "好的呀", "好的呢", "嗯嗯", "明白", "了解", "收到", "可以", "行的", "好滴", "嗯", "对", "是"]
-        complaint_phrases = ["太慢了", "好慢", "太慢了吧", "好慢啊", "等好久了", "太久了"]
-        status_query_phrases = ["进度怎么样了", "进度如何", "怎么样了", "好了吗", "完成没", "有人在吗", "有人在不在", "人呢"]
+        filters = _keywords_manager.get_filter_phrases
+        comment_phrases = filters("comment_phrases")
+        backchannel_phrases = filters("backchannel_phrases")
+        complaint_phrases = filters("complaint_phrases")
+        status_query_phrases = filters("status_query_phrases")
+
         # 过滤掉预算/数字类澄清回答（如"20 万左右"、"15 万"、"5000 块"）
         if re.search(r'\d+\s*万', text) or re.search(r'\d+\s*(块 | 元)', text):
             return None
@@ -559,15 +471,13 @@ class TaskManager:
         text = new_input.lower().strip()
 
         # 先排除附和/评论类短语
-        backchannel_phrases = ["好的", "好的呀", "好的呢", "嗯嗯", "明白", "了解", "收到", "可以", "好滴", "嗯", "对", "是"]
-        comment_phrases = ["挺好的", "非常好", "太好了", "还可以", "不错啊", "真的吗", "是吗", "不错", "挺好", "还行", "好"]
-        complaint_phrases = ["太慢了", "好慢", "太慢了吧", "好慢啊", "等好久了", "太久了"]
-        status_query_phrases = ["进度怎么样了", "进度如何", "怎么样了", "好了吗", "完成没", "有人在吗", "有人在不在", "人呢"]
-        # 新增：状态查询相关短语（不打断任务）
-        status_queries = [
-            "有点慢", "有啥信息", "有啥信息没", "你在干啥", "你在干嘛", "在干啥", "在干嘛",
-            "有任务", "还有任务", "多少任务", "几个任务",
-        ]
+        filters = _keywords_manager.get_filter_phrases
+        backchannel_phrases = filters("backchannel_phrases")
+        comment_phrases = filters("comment_phrases")
+        complaint_phrases = filters("complaint_phrases")
+        status_query_phrases = filters("status_query_phrases")
+        status_queries = filters("status_queries")
+
         # 排除预算/数字类澄清回答
         if re.search(r'\d+\s*万', text) or re.search(r'\d+\s*(块 | 元)', text):
             return False
@@ -583,11 +493,11 @@ class TaskManager:
         # 短文本（<=4 字）+ 动作词 → 可能是新话题
         # 例如：当前任务是选车，用户说"吃饭" → 切换
         if len(text) <= 4:
-            action_words = ["吃", "喝", "买", "选", "定", "订", "看", "玩"]
+            action_words = filters("action_words")
             has_action = any(kw in text for kw in action_words)
             # 有新动作且没有当前话题的关键词 → 话题切换
             if has_action and not new_topic:
-                current_keywords = self._topic_keywords.get(self._current_topic, [])
+                current_keywords = _keywords_manager.get_topic_keywords(self._current_topic)
                 has_current_topic_kw = any(kw in text for kw in current_keywords)
                 if not has_current_topic_kw:
                     return True
@@ -953,8 +863,19 @@ class TalkerThinkerApp:
         运行交互模式（支持全双工）
 
         用户可以在任务处理过程中发送新消息来打断当前任务
+
+        使用 prompt_toolkit 提供中文友好的 TUI 体验：
+        - 支持中文输入的正常删除（一次退格删除一个汉字）
+        - 支持方向键左右移动光标
+        - 支持上下键浏览历史命令
+        - 支持 Tab 自动补全
         """
+        from tui.input import get_input_handler
+
         await self.initialize()
+
+        # 获取输入处理器（优先使用 prompt_toolkit，失败时降级为原生 input）
+        input_handler = get_input_handler(use_prompt_toolkit=True)
 
         print("=" * 60)
         print("Talker-Thinker 双 Agent 系统 (全双工模式)")
@@ -969,12 +890,12 @@ class TalkerThinkerApp:
         input_queue = asyncio.Queue()
 
         async def read_input():
-            """异步读取用户输入"""
+            """异步读取用户输入 - 使用 prompt_toolkit"""
             loop = asyncio.get_event_loop()
             while True:
                 try:
-                    # 使用线程池执行阻塞的 input
-                    line = await loop.run_in_executor(None, input)
+                    # 使用 prompt_toolkit 获取输入（支持中文编辑）
+                    line = await loop.run_in_executor(None, input_handler.get_input, session_id)
                     await input_queue.put(line)
                 except EOFError:
                     break
@@ -987,14 +908,8 @@ class TalkerThinkerApp:
         try:
             while True:
                 try:
-                    # 显示输入提示（如果没有正在处理的任务）
-                    if not self.task_manager.is_processing:
-                        now = time.time()
-                        timestamp = time.strftime("%H:%M:%S", time.localtime(now))
-                        ms = int((now % 1) * 1000)
-                        print(f"\n[{timestamp}.{ms:03d}] 你：", end="", flush=True)
-
                     # 等待用户输入
+                    # 注意：使用 prompt_toolkit 时，输入提示由 prompt_toolkit 自己显示
                     try:
                         user_input = await asyncio.wait_for(
                             input_queue.get(),
@@ -1059,7 +974,10 @@ class TalkerThinkerApp:
                             # 有新输入，处理打断逻辑
                             if new_input.strip():
                                 # 显示用户输入
-                                print(f"\n\n[{time.strftime('%H:%M:%S')}.{int((time.time() % 1) * 1000):03d}] 你：{new_input}")
+                                now = time.time()
+                                timestamp = time.strftime("%H:%M:%S", time.localtime(now))
+                                ms = int((now % 1) * 1000)
+                                print(f"\n\n[{timestamp}.{ms:03d}] 你：{new_input}")
 
                                 handled, response = await self._handle_new_input_during_processing(
                                     new_input, session_id

@@ -1,0 +1,10 @@
+{
+  "version": "1.0.0",
+  "updated_at": "2026-02-21T00:00:00Z",
+  "description": "热词库 - 基于用户使用习惯自动学习的高频词汇",
+  "hot_keywords": {},
+  "learning_stats": {
+    "total_learned": 0,
+    "last_updated": null
+  }
+}
