@@ -365,38 +365,70 @@ class Orchestrator:
         """
         chunk_stripped = chunk.strip()
 
+        # 空白字符容错：移除所有空白字符后再匹配
+        normalized = re.sub(r'\s+', '', chunk_stripped)
+
         # === 检测 Thinker 阶段标记 ===
 
-        # "开始处理..." → Thinker 已启动
-        if chunk_stripped.startswith("开始处理"):
+        # "开始处理..." → Thinker 已启动（支持多种变体）
+        if chunk_stripped.startswith("开始处理") or re.search(r'开始\s*处理', chunk_stripped) or '开始处理' in normalized:
             return "Thinker 已启动，正在分析您的问题..."
 
-        # "正在 xxx..." → 正在 xxx，请稍候...
+        # "开始 xxx..." 通用模式
+        if chunk_stripped.startswith("开始") and "..." in chunk_stripped:
+            action = chunk_stripped[2:].split('.')[0].strip()
+            return f"开始{action}，请稍候..."
+
+        # "正在 xxx..." → 正在 xxx，请稍候...（支持更宽松的检测）
         if chunk_stripped.startswith("正在") and "..." in chunk_stripped:
             return f"{chunk_stripped}请稍候..."
+
+        # "正在 xxx" 没有省略号的变体
+        if chunk_stripped.startswith("正在") and len(chunk_stripped) > 4:
+            return f"{chunk_stripped}，请稍候..."
 
         # "整合结果，生成最终答案..." → 即将完成
         if "整合" in chunk_stripped and "答案" in chunk_stripped:
             return "即将完成，正在整合答案..."
 
+        # "整合 xxx" 通用模式
+        if chunk_stripped.startswith("整合"):
+            return "正在整合内容，请稍候..."
+
         # "检查答案质量..." → 质量检查中
         if "检查" in chunk_stripped and "质量" in chunk_stripped:
             return "正在进行质量检查..."
+
+        # "检查 xxx" 通用模式
+        if chunk_stripped.startswith("检查") and "..." in chunk_stripped:
+            return f"正在{chunk_stripped}，请稍候..."
 
         # "答案需要改进，正在优化..." → 优化中
         if "优化" in chunk_stripped and "答案" in chunk_stripped:
             return "正在优化答案，请稍候..."
 
-        # [步骤 X] 步骤名称...
-        step_match = re.match(r'\[步骤 (\d+)\]\s*([^\.]+)\.\.\.', chunk_stripped)
+        # "优化 xxx" 通用模式
+        if chunk_stripped.startswith("优化") and "..." in chunk_stripped:
+            return f"正在{chunk_stripped}，请稍候..."
+
+        # [步骤 X] 步骤名称...（支持中文括号和空格变体）
+        step_match = re.match(r'[\[［] 步骤\s*(\d+)[\]］]\s*([^\.\.]+)\.\.\.', chunk_stripped)
         if step_match and total_steps > 0:
             step_num = int(step_match.group(1))
             step_name = step_match.group(2)
             progress_pct = int((step_num / total_steps) * 100)
             return f"执行步骤{step_num}/{total_steps}: {step_name}（{progress_pct}%）"
 
-        # [思考] 正在 xxx...
-        thinking_match = re.match(r'\[思考\]\s*(.+)\.\.\.', chunk_stripped)
+        # [步骤 X] 没有省略号的变体
+        step_no_dots = re.match(r'[\[［] 步骤\s*(\d+)[\]］]\s*(.+)', chunk_stripped)
+        if step_no_dots and total_steps > 0 and '...' not in chunk_stripped:
+            step_num = int(step_no_dots.group(1))
+            step_name = step_no_dots.group(2).strip()
+            progress_pct = int((step_num / total_steps) * 100)
+            return f"执行步骤{step_num}/{total_steps}: {step_name}（{progress_pct}%）"
+
+        # [思考] 正在 xxx...（支持中文括号）
+        thinking_match = re.match(r'[\[［] 思考[\]］]\s*(.+)\.\.\.', chunk_stripped)
         if thinking_match:
             action = thinking_match.group(1)
             # 根据阶段给出更友好的描述
@@ -409,17 +441,31 @@ class Orchestrator:
             else:
                 return f"正在{action}..."
 
+        # [思考] 没有省略号的变体
+        thinking_no_dots = re.match(r'[\[［] 思考[\]］]\s*(.+)', chunk_stripped)
+        if thinking_no_dots and '...' not in chunk_stripped:
+            action = thinking_no_dots.group(1).strip()
+            return f"正在{action}，请稍候..."
+
         # [规划] 任务目标：xxx
-        plan_target_match = re.match(r'\[规划\]\s*任务目标:\s*(.+)', chunk_stripped)
+        plan_target_match = re.match(r'[\[［] 规划[\]］]\s*任务目标:\s*(.+)', chunk_stripped)
         if plan_target_match:
             target = plan_target_match.group(1)
             return f"已理解任务目标：{target}"
 
         # [规划] 共 X 个步骤
-        plan_steps_match = re.match(r'\[规划\]\s*共 (\d+) 个步骤', chunk_stripped)
+        plan_steps_match = re.match(r'[\[［] 规划[\]］]\s*共\s*(\d+)\s*个步骤', chunk_stripped)
         if plan_steps_match:
             num_steps = int(plan_steps_match.group(1))
             return f"任务已分解为{num_steps}个步骤，开始执行..."
+
+        # [规划] 通用模式
+        if chunk_stripped.startswith("[规划]") or chunk_stripped.startswith("［规划］"):
+            return "正在规划任务执行方案..."
+
+        # [分析] 通用模式（新增支持）
+        if chunk_stripped.startswith("[分析]") or chunk_stripped.startswith("［分析］"):
+            return "正在分析问题，请稍候..."
 
         # ✓ 完成 (Xms) - 静默处理
         check_done_match = re.match(r'✓\s*完成\s*\((\d+)ms\)', chunk_stripped)
@@ -427,11 +473,29 @@ class Orchestrator:
             # 步骤完成标记，静默处理
             return None
 
-        # [答案] xxx
-        answer_match = re.match(r'\[答案\]\s*(.+)', chunk_stripped)
+        # [答案] xxx - 最终答案，静默处理，由后续逻辑处理
+        answer_match = re.match(r'[\[［] 答案[\]］]\s*(.+)', chunk_stripped)
         if answer_match:
-            # 最终答案，保留 Thinker 标识
+            # 最终答案内容，返回 None 让正常流程处理
             return None
+
+        # 通用阶段标记处理 - fallback 机制
+        # 检查是否是 Thinker 的阶段标记格式：[阶段名] 内容
+        stage_marker_match = re.match(r'[\[［](步骤 | 思考 | 规划 | 分析 | 执行 | 整合 | 答案)[\]］]\s*(.+)', chunk_stripped)
+        if stage_marker_match:
+            stage_type = stage_marker_match.group(1)
+            content = stage_marker_match.group(2)
+            # 通用的阶段标记处理
+            return f"正在处理中，请稍候..."
+
+        # 空白字符容错检测：对于短内容，使用 normalized 再次检测
+        if len(normalized) < 20:
+            if '开始处理' in normalized:
+                return "Thinker 已启动，正在分析您的问题..."
+            if '正在分析' in normalized:
+                return "正在分析问题，请稍候..."
+            if '整合答案' in normalized:
+                return "即将完成，正在整合答案..."
 
         # 未检测到阶段标记，返回 None 让原始输出显示
         return None
@@ -1116,15 +1180,15 @@ class Orchestrator:
             "启动协作模式",
         )
 
-        # Thinker开始工作的提示
-        ts = format_timestamp(time.time())
-        yield f"\n[{ts}] Thinker: 开始处理..."
+        # Thinker 开始工作的提示 - 由 Talker 播报，后续劫持机制会处理
 
         # 收集Thinker的输出
         thinker_output = []
         thinker_complete = False
         accumulated_output = ""
         thinker_first_token_shown = False
+        # 标记：precheck 超时后已播报，避免与 Thinker 劫持输出重复
+        precheck_timeout_broadcast = precheck_timed_out
 
         # 播报控制 - 使用独立的时间检查（动态间隔）
         last_broadcast_time = thinker_start
@@ -1280,22 +1344,43 @@ class Orchestrator:
                         chunk, new_stage, current_step, total_steps, step_desc, elapsed
                     )
                     if talker_rewrite:
+                        # 避免重复播报：如果 precheck 超时已播报"先进入详细处理"，
+                        # 且 Thinker 输出是"开始处理"，则跳过劫持（静默处理）
+                        if precheck_timeout_broadcast and "Thinker 已启动" in talker_rewrite:
+                            # 静默处理，不重复播报，但重置 heartbeat 计时器
+                            last_broadcast_time = current_time
+                            continue
+
                         # Talker 劫持输出，重新组织语言
                         # 重置 heartbeat 计时器，避免重复播报
                         last_broadcast_time = current_time
 
                         if not thinker_first_token_shown:
                             ts = format_timestamp(current_time)
-                            yield f"\n[{ts}] "
+                            yield f"\n[{ts}] Talker: "
                             thinker_first_token_shown = True
                         yield talker_rewrite
                     else:
-                        # 非阶段标记输出，直接显示（保留 Thinker 标识）
-                        if not thinker_first_token_shown:
-                            ts = format_timestamp(current_time)
-                            yield f"\n[{ts}] Thinker: "
-                            thinker_first_token_shown = True
-                        yield chunk
+                        # 非阶段标记输出，使用 Talker 风格播报
+                        # 根据内容判断是否需要特殊处理
+                        if chunk.strip() and not chunk.startswith('[答案]'):
+                            # 普通内容，使用通用的 Talker 播报
+                            if not thinker_first_token_shown:
+                                ts = format_timestamp(current_time)
+                                yield f"\n[{ts}] Talker: "
+                                thinker_first_token_shown = True
+                            # 短内容直接显示，长内容截断
+                            if len(chunk.strip()) > 50:
+                                yield f"{chunk.strip()[:50]}..."
+                            else:
+                                yield chunk.strip()
+                        else:
+                            # 答案内容或空内容，直接显示
+                            if not thinker_first_token_shown and chunk.strip():
+                                ts = format_timestamp(current_time)
+                                yield f"\n[{ts}] Talker: "
+                                thinker_first_token_shown = True
+                            yield chunk
             else:
                 # 没有新输出时短暂等待
                 await asyncio.sleep(0.05)
@@ -1307,7 +1392,7 @@ class Orchestrator:
             if chunk.strip():
                 if not thinker_first_token_shown:
                     ts = format_timestamp(time.time())
-                    yield f"\n[{ts}] Thinker: "
+                    yield f"\n[{ts}] Talker: "
                     thinker_first_token_shown = True
             yield chunk
 

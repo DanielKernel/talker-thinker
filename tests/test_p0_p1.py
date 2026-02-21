@@ -132,6 +132,7 @@ class TestP1SharedContextFlow:
 
     @pytest.mark.asyncio
     async def test_collaboration_handoff_returns_on_clarification(self):
+        """测试协作模式在需要澄清时返回澄清问题"""
         orchestrator = self._create_orchestrator()
         shared = SharedContext(user_input="帮我选车")
         context = {"shared": shared, "messages": []}
@@ -154,9 +155,12 @@ class TestP1SharedContextFlow:
             chunks.append(chunk)
 
         merged = "".join(chunks)
-        assert "正在同步上下文并规划步骤" in merged
+        # 应该有 Talker 反馈和澄清问题
+        assert "Talker:" in merged
         assert "预算范围" in merged
+        # 优化后不再有 Thinker: 开始处理
         assert "Thinker: 开始处理" not in merged
+        # 应该有澄清请求
         assert shared.needs_clarification() is True
 
     @pytest.mark.asyncio
@@ -249,7 +253,9 @@ class TestP1SharedContextFlow:
 
         merged = "".join(chunks)
         assert "预分析耗时较长" in merged
-        assert "Thinker: 开始处理" in merged
+        # After optimization, Thinker output is hijacked by Talker, so we should see Talker: instead of Thinker:
+        assert "Talker:" in merged
+        assert "Thinker: 开始处理" not in merged  # This should NOT appear anymore
 
     @pytest.mark.asyncio
     async def test_needs_clarification_respects_preferences(self):
