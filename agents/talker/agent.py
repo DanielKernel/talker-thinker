@@ -3,6 +3,7 @@ Talker Agent - 对话者
 负责快速响应、简单意图闭环、实时反馈
 """
 import asyncio
+import re
 import time
 from dataclasses import dataclass, field
 from typing import Any, AsyncIterator, Callable, Dict, List, Optional
@@ -415,15 +416,42 @@ class TalkerAgent:
             )
             return response.strip()
         except asyncio.TimeoutError:
-            # 超时时返回基于时间的默认消息
+            # 超时时返回基于时间的默认消息（带话题）
+            topic = self._extract_topic_for_broadcast(original_query)
             if elapsed_time < 10:
-                return "正在处理中..."
+                return f"正在处理「{topic}」..."
             elif elapsed_time < 30:
-                return "正在深入分析..."
+                return f"「{topic}」深度分析中..."
             else:
-                return "即将完成，请稍候..."
+                return f"「{topic}」即将完成，请稍候..."
         except Exception:
             return f"已处理 {elapsed_time:.0f} 秒..."
+
+    def _extract_topic_for_broadcast(self, query: str) -> str:
+        """从用户问题中提取主题关键词用于播报"""
+        query_lower = query.lower()
+
+        # 话题关键词配置
+        topic_keywords = [
+            ("奶茶", ["奶茶", "波霸", "珍珠奶茶"]),
+            ("咖啡", ["咖啡", "拿铁", "星巴克", "瑞幸"]),
+            ("打车", ["打车", "滴滴", "高德", "专车"]),
+            ("选车", ["车", "汽车", "车型", "品牌", "suv"]),
+            ("旅游", ["旅游", "景点", "酒店", "机票"]),
+            ("美食", ["美食", "餐厅", "餐馆", "菜", "吃"]),
+            ("手机", ["手机", "苹果", "华为", "小米", "oppo", "vivo"]),
+            ("对比", ["对比", "哪个好", "有什么区别", "差异"]),
+        ]
+
+        for topic, keywords in topic_keywords:
+            if any(kw in query_lower for kw in keywords):
+                return topic
+
+        # 提取问题中的关键词
+        words = re.findall(r'[\u4e00-\u9fa5]{2,4}', query)
+        if words:
+            return words[0]
+        return "任务"
 
     async def _medium_response(
         self,

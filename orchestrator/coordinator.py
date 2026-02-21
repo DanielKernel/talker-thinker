@@ -248,6 +248,7 @@ class Orchestrator:
         current_step: int = 0,
         total_steps: int = 0,
         step_desc: str = "",
+        partial_results: Optional[List[str]] = None,
     ) -> tuple[str, str]:
         """
         根据阶段生成播报消息
@@ -286,14 +287,14 @@ class Orchestrator:
         if stage == ThinkerStage.IDLE:
             if style == "initial":
                 templates = [
-                    "深度思考模块已接手，正在加载上下文",
+                    f"深度思考模块已接手，正在加载关于「{topic}」的上下文",
                     "正在准备分析环境",
-                    "正在同步任务信息",
+                    f"正在同步「{topic}」相关信息",
                 ]
             elif style == "progress":
                 templates = [
-                    "仍在准备分析，请稍候",
-                    "即将开始深度分析",
+                    f"仍在准备「{topic}」分析，请稍候",
+                    f"即将开始分析「{topic}」",
                 ]
             else:
                 templates = ["准备工作进行中"]
@@ -301,45 +302,57 @@ class Orchestrator:
             template = get_unused_template(templates, used_templates)
             if template == "准备工作进行中":
                 return f"{template} ({elapsed_time:.0f}s)...", template
+            # 注入中间结果到播报
+            if partial_results and partial_results[-1]:
+                latest = partial_results[-1][:25]
+                return f"{template}（{latest}）...", template
             return f"{template}...", template
 
         if stage == ThinkerStage.ANALYZING:
             if style == "initial":
                 templates = [
                     f"正在理解您关于「{topic}」的需求",
-                    "正在分析问题关键点",
+                    f"正在分析「{topic}」问题关键点",
                     f"梳理「{topic}」相关信息",
                 ]
             elif style == "progress":
                 templates = [
-                    "深度分析中，请稍候",
-                    "正在提取关键要素",
+                    f"深度分析「{topic}」中，请稍候",
+                    f"正在提取「{topic}」关键要素",
                 ]
             else:
                 # 长时间等待，显示已用时间
-                templates = ["分析进行中"]  # 不含时间，时间单独显示
+                templates = [f"「{topic}」分析进行中"]  # 不含时间，时间单独显示
 
             template = get_unused_template(templates, used_templates)
             # 如果是"分析进行中"，加上时间
-            if template == "分析进行中":
+            if "分析进行中" in template:
                 return f"{template} ({elapsed_time:.0f}s)...", template
+            # 注入中间结果到播报
+            if partial_results and partial_results[-1]:
+                latest = partial_results[-1][:25]
+                return f"{template}（{latest}）...", template
             return f"{template}...", template
 
         elif stage == ThinkerStage.PLANNING:
             if style == "initial":
                 templates = [
-                    f"已理解需求，正在制定{topic}方案",
-                    "规划最优解决路径",
+                    f"已理解「{topic}」需求，正在制定方案",
+                    f"规划「{topic}」最优解决路径",
                 ]
             elif style == "progress":
                 templates = [
-                    "方案设计中",
-                    "正在分解任务步骤",
+                    f"「{topic}」方案设计中",
+                    f"正在分解「{topic}」任务步骤",
                 ]
             else:
-                templates = ["规划中"]
+                templates = [f"「{topic}」规划中"]
 
             template = get_unused_template(templates, used_templates)
+            # 注入中间结果到播报
+            if partial_results and partial_results[-1]:
+                latest = partial_results[-1][:25]
+                return f"{template}（{latest}）...", template
             return f"{template}...", template
 
         elif stage == ThinkerStage.EXECUTING:
@@ -362,22 +375,26 @@ class Orchestrator:
                 return msg, template
             # 没有具体步骤信息时的降级播报
             templates = [
-                "正在处理核心任务",
-                "执行关键步骤",
+                f"正在处理「{topic}」核心任务",
+                f"执行「{topic}」关键步骤",
             ]
             template = get_unused_template(templates, used_templates)
+            # 注入中间结果到播报
+            if partial_results and partial_results[-1]:
+                latest = partial_results[-1][:25]
+                return f"{template}（{latest}）...", template
             return f"{template}...", template
 
         elif stage == ThinkerStage.SYNTHESIZING:
             # 按时间顺序使用不同模板，避免随机选择导致重复
             if elapsed_time < 10:
-                templates = ["正在整合分析结果，请稍候..."]
+                templates = [f"正在整合「{topic}」分析结果，请稍候..."]
             elif elapsed_time < 20:
-                templates = ["正在整理最终答案..."]
+                templates = [f"正在整理「{topic}」最终答案..."]
             elif elapsed_time < 30:
-                templates = ["即将完成，正在进行质量检查..."]
+                templates = [f"即将完成，正在进行「{topic}」质量检查..."]
             else:
-                templates = ["正在优化答案，感谢耐心等待..."]
+                templates = [f"正在优化「{topic}」答案，感谢耐心等待..."]
 
             # 使用时间分段选择模板
             elapsed_bucket = int(elapsed_time // 10)
@@ -385,7 +402,7 @@ class Orchestrator:
             return template, f"synthesize_bucket_{elapsed_bucket}"
 
         elif stage == ThinkerStage.COMPLETED:
-            return "处理完成！", "处理完成"
+            return f"「{topic}」处理完成！", "处理完成"
 
         # 默认消息
         return f"处理中 ({elapsed_time:.0f}s)...", "处理中"
@@ -1454,6 +1471,8 @@ class Orchestrator:
                             broadcast_msg = f"仍在{stage_zh}阶段（{elapsed:.0f}s）{suffix}"
                             msg_template = f"heartbeat_{new_stage.value}_{int(elapsed // 15)}"
                     else:
+                        # 从共享上下文获取中间结果
+                        partials = shared.thinker_progress.partial_results if shared else []
                         broadcast_msg, msg_template = self._generate_stage_broadcast(
                             stage=new_stage,
                             user_query=user_input,
@@ -1461,6 +1480,7 @@ class Orchestrator:
                             current_step=current_step,
                             total_steps=total_steps,
                             step_desc=step_desc,
+                            partial_results=partials,
                         )
 
                     # 基于模板去重（不是完整消息）

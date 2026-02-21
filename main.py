@@ -756,6 +756,13 @@ class TalkerThinkerApp:
                 # 其他评论，给予简单回应
                 return True, f"\n[Talker] 嗯，继续处理中..."
 
+        # 兜底：如果输入包含疑问词但没有被分类，给予默认回应
+        # 这个检测放在 COMMENT 之后，确保疑问句能得到回应
+        has_question_char = any(c in new_input for c in ["吗", "呢", "?", "?", "啥", "何", "多久"])
+        has_status_word = any(c in new_input for c in ["还", "在", "没", "未", "完", "成", "久", "慢", "等", "回", "应", "好"])
+        if has_question_char and has_status_word and intent in [UserIntent.COMMENT, UserIntent.BACKCHANNEL]:
+            return True, f"\n[Talker] 在的！正在处理「{current[:20]}...」，请稍候..."
+
         elif intent == UserIntent.BACKCHANNEL:
             # 附和/应答，简短回应
             return True, "\n[Talker] 嗯，继续..."
