@@ -719,6 +719,11 @@ class TalkerThinkerApp:
         Returns:
             tuple: (是否已处理，响应内容)
         """
+        # 退出命令优先处理（最高优先级）
+        if new_input.lower() in ("quit", "exit"):
+            await self.task_manager.cancel_current_task()
+            return True, "__EXIT__"  # 特殊标记，主循环检测到此标记应退出
+
         interrupt_action, replacement_input = self.task_manager.decide_interrupt_action(new_input)
         intent = self.task_manager.classify_intent(new_input)
         current = self.task_manager.current_input or "您的请求"
@@ -988,6 +993,10 @@ class TalkerThinkerApp:
                         )
 
                         if handled:
+                            # 检测退出标记
+                            if response == "__EXIT__":
+                                print("\n再见!")
+                                break
                             # 任务已处理（如查询状态），显示响应
                             if response:
                                 print(response)

@@ -357,15 +357,24 @@ class ThinkerAgent:
 
         return f"""作为一个任务规划专家，请分析以下用户请求并制定执行计划：
 
+【重要约束】
+1. 必须严格围绕用户的原始需求进行规划，不得偏离主题
+2. 所有步骤必须与用户请求直接相关，避免无关内容
+3. 如果用户需求涉及具体物品/服务（如奶茶、餐厅等），计划必须聚焦于此
+
 用户请求：{user_input}
 {context_info}
 {skills_info}
 {pref_info}
 
-请输出JSON格式的计划：
+【规划要求】
+- intent 字段：用一句话复述用户需求，表明你理解正确
+- steps 字段：所有步骤必须直接服务于用户需求
+
+请输出 JSON 格式的计划：
 {{
-  "intent": "用户的核心意图（一句话）",
-  "constraints": ["约束条件1", "约束条件2"],
+  "intent": "复述用户需求，表明理解",
+  "constraints": ["约束条件 1", "约束条件 2"],
   "steps": [
     {{
       "name": "步骤名称",
@@ -380,7 +389,7 @@ class ThinkerAgent:
   "estimated_time": 预计秒数
 }}
 
-只输出JSON，不要其他内容。"""
+只输出 JSON，不要其他内容。"""
 
     def _parse_plan(self, response: str) -> TaskPlan:
         """解析规划响应"""
