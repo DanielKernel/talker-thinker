@@ -889,11 +889,25 @@ class TalkerThinkerApp:
         session_id = None
         input_queue = asyncio.Queue()
 
+        # 输出完成事件：用于控制输入提示的显示时机
+        # 事件 set 时表示输出完成，可以显示输入提示
+        output_complete_event = asyncio.Event()
+        output_complete_event.set()  # 初始状态为已设置，允许显示输入提示
+
+        # 将输出事件传递给输入处理器
+        if hasattr(input_handler, 'set_output_event'):
+            input_handler.set_output_event(output_complete_event)
+
         async def read_input():
             """异步读取用户输入 - 使用 prompt_toolkit"""
             loop = asyncio.get_event_loop()
             while True:
                 try:
+                    # 等待输出完成后再显示输入提示
+                    # 这确保了输入提示不会在 Talker 输出过程中显示
+                    while not output_complete_event.is_set():
+                        await asyncio.sleep(0.1)
+
                     # 使用 prompt_toolkit 获取输入（支持中文编辑）
                     line = await loop.run_in_executor(None, input_handler.get_input, session_id)
                     await input_queue.put(line)
@@ -963,6 +977,9 @@ class TalkerThinkerApp:
                         session_id = str(uuid.uuid4())
 
                     # 创建并运行处理任务
+                    # 在开始处理前，清除输出完成事件，防止输入提示显示
+                    output_complete_event.clear()
+
                     self.task_manager._cancelled = False
                     process_task = await self._process_as_task(
                         user_input, session_id, input_time
@@ -978,16 +995,13 @@ class TalkerThinkerApp:
                             )
                             # 有新输入，处理打断逻辑
                             if new_input.strip():
-                                # 显示用户输入
-                                now = time.time()
-                                timestamp = time.strftime("%H:%M:%S", time.localtime(now))
-                                ms = int((now % 1) * 1000)
-                                print(f"\n\n[{timestamp}.{ms:03d}] 你：{new_input}")
-
+                                # 1. 先处理获取响应，不立即显示用户输入
+                                #    prompt_toolkit 已经显示了输入提示，这里只需要处理逻辑
                                 handled, response = await self._handle_new_input_during_processing(
                                     new_input, session_id
                                 )
 
+                                # 2. 先显示 Talker 响应（如果有）
                                 if handled:
                                     if response:
                                         print(response)
@@ -1008,6 +1022,10 @@ class TalkerThinkerApp:
                     if process_task.done():
                         self.task_manager.end_task()
                         print()  # 换行
+
+                        # 任务完成，设置输出完成事件，允许显示输入提示
+                        output_complete_event.set()
+
                         if pending_new_input:
                             user_input = pending_new_input
                             self.task_manager._cancelled = False

@@ -11,6 +11,7 @@ Provides Chinese-friendly input with:
 import os
 import asyncio
 from pathlib import Path
+from typing import Optional
 
 from prompt_toolkit import prompt
 from prompt_toolkit.history import FileHistory
@@ -74,6 +75,18 @@ class TalkerInput:
         history_path.parent.mkdir(parents=True, exist_ok=True)
 
         self._history = FileHistory(self.history_file)
+
+        # Output event for synchronizing input prompt display
+        self._output_event: Optional[asyncio.Event] = None
+
+    def set_output_event(self, event: asyncio.Event) -> None:
+        """
+        Set the output event for synchronizing input prompt display
+
+        Args:
+            event: asyncio.Event that is set when output is complete
+        """
+        self._output_event = event
 
     def get_input(self, session_id: str = None) -> str:
         """
