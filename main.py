@@ -12,10 +12,56 @@ from typing import Optional
 
 from config import settings
 from orchestrator.coordinator import Orchestrator
+from context.shared_context import TaskQueue, TaskInfo
 from monitoring.logging import get_logger
 from monitoring.metrics import get_metrics_collector
 
 logger = get_logger("main")
+
+
+
+# === 用户情绪检测工具函数 ===
+def detect_user_emotion(text: str) -> str:
+    """
+    检测用户情绪状态
+
+    Args:
+        text: 用户输入文本
+
+    Returns:
+        情绪标签：'complaint'（抱怨）、'neutral'（中性）、'positive'（正面）、'negative'（负面）
+    """
+    text_lower = text.lower().strip()
+
+    # 抱怨/不满情绪
+    complaint_patterns = [
+        "太慢", "好慢", "慢死了", "太久了", "等了好久", "怎么这么慢",
+        "太乱", "好乱", "乱七八糟", "听不懂", "不明白",
+        "没用", "不行", "不好", "太差了", "真差",
+        "你在干啥", "你在干嘛", "怎么没反应", "没回应",
+    ]
+    if any(p in text_lower for p in complaint_patterns):
+        return "complaint"
+
+    # 负面情绪（失望、放弃）
+    negative_patterns = [
+        "算了", "不要了", "不用了", "不弄了", "不搞了",
+        "失望", "无语", "唉", "哎",
+    ]
+    if any(p in text_lower for p in negative_patterns):
+        return "negative"
+
+    # 正面情绪
+    positive_patterns = [
+        "太好了", "很好", "不错", "挺好", "真棒", "厉害",
+        "谢谢", "感谢", "辛苦了", "好的", "好的谢谢",
+        "哈哈", "嘻嘻", "笑死", "有趣",
+    ]
+    if any(p in text_lower for p in positive_patterns):
+        return "positive"
+
+    # 默认中性
+    return "neutral"
 
 
 class UserIntent(Enum):
@@ -52,6 +98,8 @@ class TaskManager:
         self._task_start_time: float = 0  # 任务开始时间
         self._current_topic: Optional[str] = None
         self._pending_replacement_input: Optional[str] = None
+        # 多任务队列支持
+        self.task_queue = TaskQueue()
         # 话题库
         self._topic_keywords = {
             "选车": ["车", "汽车", "买车", "选车", "suv", "轿车", "新能源车", "车型", "品牌"],
@@ -97,7 +145,11 @@ class TaskManager:
         self._current_topic = self._extract_topic(user_input)
 
     def end_task(self):
-        """结束当前任务"""
+        """结束当前任务并启动队列中的下一个任务"""
+        # 将当前任务标记为完成
+        if self._current_topic and hasattr(self, '_completed_tasks'):
+            pass  # 可以在这里添加完成记录
+        
         self._current_task = None
         self._current_input = None
         self._is_processing = False
@@ -159,6 +211,19 @@ class TaskManager:
             return True
         return False
 
+
+    def get_running_tasks_count(self) -> int:
+        """获取正在运行的任务数量"""
+        count = 1 if self._current_task else 0
+        return count
+
+    def get_task_queue_status(self) -> str:
+        """获取任务队列状态"""
+        return self.task_queue.get_status_summary()
+
+    def get_pending_tasks_count(self) -> int:
+        """获取待处理任务数量"""
+        return len(self.task_queue.pending)
     def classify_intent(self, new_input: str) -> UserIntent:
         """
         分类用户意图：基于语义理解，不是所有输入都应该打断任务
@@ -719,8 +784,14 @@ class TalkerThinkerApp:
             return True, "\n[Talker] 嗯，继续..."
 
         elif intent == UserIntent.QUERY_STATUS:
-            # 查询状态，给详细反馈
+            # 查询状态，给详细反馈（包括任务数量）
             elapsed = time.time() - self.task_manager.task_start_time
+            # 检查用户是否询问任务数量
+            if "几个任务" in new_input or "多少任务" in new_input or "多少任务" in new_input:
+                running_count = self.task_manager.get_running_tasks_count()
+                pending_count = self.task_manager.get_pending_tasks_count()
+                queue_status = self.task_manager.get_task_queue_status()
+                return True, f"\n[Talker] 当前有{running_count}个任务正在执行，{pending_count}个任务在等待。{queue_status}"
             return True, self._build_status_reply(session_id, current, elapsed)
 
         elif intent == UserIntent.REPLACE:
@@ -753,13 +824,30 @@ class TalkerThinkerApp:
                 self._pending_new_task = None
                 return False, "\n[Talker] 好的，已取消当前任务，开始处理新任务..."
             elif choice == "queue":
-                # 加入队列逻辑（待实现多任务队列）
+                # 加入队列逻辑
+                pending_task = self._pending_new_task
                 self._pending_new_task = None
-                return True, "\n[Talker] 新任务已加入队列，当前任务继续处理..."
+                # 将新任务加入队列
+                task_info = TaskInfo(
+                    task_id=f"task_{time.time()}",
+                    name=pending_task[:30],
+                    user_input=pending_task,
+                )
+                self.task_manager.task_queue.add_pending(task_info)
+                return True, f"\n[Talker] 新任务已加入队列（当前等待：{self.task_manager.task_queue.get_status_summary()}），当前任务继续处理..."
             elif choice == "after":
-                # 完成后处理逻辑
+                # 完成后处理逻辑 - 插入队列最前面
+                pending_task = self._pending_new_task
+                self._pending_new_task = None
                 self._awaiting_confirmation = False
-                return True, "\n[Talker] 好的，新任务将在当前任务完成后立即处理"
+                task_info = TaskInfo(
+                    task_id=f"task_{time.time()}",
+                    name=pending_task[:30],
+                    user_input=pending_task,
+                )
+                # 插入到队列最前面
+                self.task_manager.task_queue.pending.insert(0, task_info)
+                return True, f"\n[Talker] 好的，新任务将在当前任务完成后立即处理（队列状态：{self.task_manager.task_queue.get_status_summary()}）"
 
         elif intent == UserIntent.MODIFY:
             # 补充信息，确认收到
@@ -951,6 +1039,15 @@ class TalkerThinkerApp:
                         except asyncio.CancelledError:
                             pass
                         self.task_manager.end_task()
+                        
+                        # 检查是否有队列中的任务需要处理
+                        next_task = self.task_manager.task_queue.start_next()
+                        if next_task:
+                            print(f"\n[Talker] 开始处理队列任务：{next_task.name}...")
+                            # 异步启动新任务（不等待完成）
+                            asyncio.create_task(self._process_as_task(
+                                next_task.user_input, session_id, time.time()
+                            ))
                         print()
 
                 except KeyboardInterrupt:
@@ -1042,50 +1139,6 @@ def main():
 
 if __name__ == "__main__":
     main()
-
-
-# === 用户情绪检测工具函数 ===
-def detect_user_emotion(text: str) -> str:
-    """
-    检测用户情绪状态
-
-    Args:
-        text: 用户输入文本
-
-    Returns:
-        情绪标签：'complaint'（抱怨）、'neutral'（中性）、'positive'（正面）、'negative'（负面）
-    """
-    text_lower = text.lower().strip()
-
-    # 抱怨/不满情绪
-    complaint_patterns = [
-        "太慢", "好慢", "慢死了", "太久了", "等了好久", "怎么这么慢",
-        "太乱", "好乱", "乱七八糟", "听不懂", "不明白",
-        "没用", "不行", "不好", "太差了", "真差",
-        "你在干啥", "你在干嘛", "怎么没反应", "没回应",
-    ]
-    if any(p in text_lower for p in complaint_patterns):
-        return "complaint"
-
-    # 负面情绪（失望、放弃）
-    negative_patterns = [
-        "算了", "不要了", "不用了", "不弄了", "不搞了",
-        "失望", "无语", "唉", "哎",
-    ]
-    if any(p in text_lower for p in negative_patterns):
-        return "negative"
-
-    # 正面情绪
-    positive_patterns = [
-        "太好了", "很好", "不错", "挺好", "真棒", "厉害",
-        "谢谢", "感谢", "辛苦了", "好的", "好的谢谢",
-        "哈哈", "嘻嘻", "笑死", "有趣",
-    ]
-    if any(p in text_lower for p in positive_patterns):
-        return "positive"
-
-    # 默认中性
-    return "neutral"
 
     def _get_current_task_progress(self, session_id: str) -> Dict[str, Any]:
         """获取当前任务进度信息"""
