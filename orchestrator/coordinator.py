@@ -878,8 +878,6 @@ class Orchestrator:
         if settings.SHOW_AGENT_IDENTITY:
             timestamp = format_timestamp(thinker_start)
             yield f"\n[{timestamp}] Talker: 好的，这个问题需要深度思考，已转交给Thinker处理"
-            precheck_ts = format_timestamp(time.time())
-            yield f"\n[{precheck_ts}] Talker: 正在同步上下文并规划步骤，请稍候..."
 
         # === 澄清机制：检测是否需要澄清（带主动播报） ===
         async def run_precheck():
@@ -896,13 +894,18 @@ class Orchestrator:
 
         precheck_task = asyncio.create_task(run_precheck())
         precheck_last_broadcast = thinker_start
-        precheck_templates = ["仍在分析关键信息", "正在核对必要条件", "即将进入详细推理"]
+        # 预检查阶段播报模板（有限集合，按顺序使用）
+        precheck_templates = ["正在分析关键信息", "正在核对必要条件", "即将进入详细推理"]
         precheck_idx = 0
         last_precheck_template = ""
         precheck_timed_out = False
+        precheck_first_feedback_shown = False  # 确保 2 秒内有首次反馈
 
         while not precheck_task.done():
             now = time.time()
+            elapsed_since_start = now - thinker_start
+
+            # 超时处理
             if now - thinker_start >= self._precheck_timeout_s:
                 precheck_timed_out = True
                 precheck_task.cancel()
@@ -912,6 +915,18 @@ class Orchestrator:
                 if shared:
                     shared.add_talker_interaction(timeout_msg, "broadcast")
                 break
+
+            # 确保 2 秒内有首次反馈（SLA）
+            if not precheck_first_feedback_shown and elapsed_since_start >= 2.0:
+                ts = format_timestamp(now)
+                yield f"\n[{ts}] Talker: 正在同步上下文并规划步骤，请稍候..."
+                if shared:
+                    shared.add_talker_interaction("正在同步上下文并规划步骤", "broadcast")
+                precheck_first_feedback_shown = True
+                precheck_last_broadcast = now
+                continue
+
+            # 常规播报（5 秒间隔）
             if now - precheck_last_broadcast >= 5.0:
                 if precheck_idx < len(precheck_templates):
                     msg = precheck_templates[precheck_idx]

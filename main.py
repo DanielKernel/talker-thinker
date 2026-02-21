@@ -52,6 +52,17 @@ class TaskManager:
         self._task_start_time: float = 0  # 任务开始时间
         self._current_topic: Optional[str] = None
         self._pending_replacement_input: Optional[str] = None
+        # 话题库
+        self._topic_keywords = {
+            "选车": ["车", "汽车", "买车", "选车", "suv", "轿车", "新能源车", "车型", "品牌"],
+            "打车": ["打车", "滴滴", "高德", "taxi", "专车", "快车", "叫车"],
+            "咖啡": ["咖啡", "拿铁", "星巴克", "瑞幸"],
+            "美食": ["餐厅", "美食", "吃的", "推荐菜", "吃饭", "吃", "餐馆", "菜"],
+            "家具": ["家具", "沙发", "床", "桌子", "椅子", "家居"],
+            "应用": ["app", "软件", "应用", "平台"],
+            "购物": ["买", "购物", "价格", "便宜", "对比"],
+            "旅游": ["旅游", "景点", "酒店", "机票", "旅行"],
+        }
 
     @property
     def is_processing(self) -> bool:
@@ -205,8 +216,11 @@ class TaskManager:
             "定个", "订个", "改成", "改查", "换成",
         ]
         if any(phrase in text for phrase in explicit_new_task_phrases):
-            if self._is_likely_new_task(text):
-                return UserIntent.REPLACE
+            return UserIntent.REPLACE
+
+        # === 0.2 话题切换检测 ===
+        if self._is_topic_switch(new_input):
+            return UserIntent.REPLACE
 
         # === 1. 检测用户在等待中的疑问/抱怨 ===
         waiting_questions = [
@@ -218,7 +232,10 @@ class TaskManager:
             "你在干啥", "你在干嘛", "分析啥", "在做什么",
         ]
         if any(q in text for q in waiting_questions):
-            if any(q in text for q in ["吗", "？", "?", "在", "没", "啥", "进展"]):
+            # 有语气词或直接是抱怨词/状态查询词 → QUERY_STATUS
+            complaint_words = ["太慢", "好慢", "等好久了", "怎么这么慢"]
+            status_words = ["进度", "怎么样了", "好了吗", "完成没", "怎么样"]
+            if any(q in text for q in ["吗", "？", "?", "在", "没", "啥", "进展"]) or any(c in text for c in complaint_words) or any(s in text for s in status_words):
                 return UserIntent.QUERY_STATUS
             return UserIntent.COMMENT
 
@@ -264,21 +281,14 @@ class TaskManager:
         if any(kw in text for kw in resume_keywords):
             return UserIntent.RESUME
 
-        # === 6. 检查是否是全新的任务请求（需要打断） ===
+        # === 6. 检查是否是全新的任务请求（需要打断）===
+        # 注意：话题切换已经在前面的步骤检测了，这里只处理同类话题内的新请求
         new_task_indicators = [
             "我要", "帮我", "给我", "推荐", "分析", "比较", "查一下",
             "选", "买", "找", "看", "订", "定", "吃", "点餐",
         ]
         if any(q in text for q in new_task_indicators):
-            # 检查是否与当前任务相关
-            current_topic = self._current_topic or self._extract_topic(self._current_input)
-            new_topic = self._extract_topic(new_input)
-
-            # 如果话题不同，认为是新任务
-            if current_topic and new_topic and current_topic != new_topic:
-                return UserIntent.REPLACE
-
-            # 如果包含明确的任务词
+            # 如果包含明确的任务词且长度足够，认为是新任务
             if len(text) >= 4:
                 return UserIntent.REPLACE
 
@@ -287,11 +297,15 @@ class TaskManager:
             return UserIntent.MODIFY
 
         # === 8. 回答澄清问题 ===
+        # 注意：先检测评论/感叹，避免"挺好的"被误判为澄清回答
         clarify_keywords = [
-            "是", "对", "好", "可以", "要", "大概", "左右",
+            "是", "对", "要", "大概", "左右",
             "万", "块", "元", "预算", "北京", "上海", "广州", "深圳",
         ]
-        if any(kw in text for kw in clarify_keywords) and len(text) < 20:
+        # 澄清回答通常是单个确认词，且不包含评论词
+        comment_words = ["好", "不错", "行", "可以", "挺", "真", "太"]
+        is_comment = any(cw in text for cw in comment_words)
+        if not is_comment and any(kw in text for kw in clarify_keywords) and len(text) < 20:
             return UserIntent.CONTINUE
 
         # === 9. 默认：不打断任务 ===
@@ -433,21 +447,71 @@ class TaskManager:
 
     def _extract_topic(self, text: str) -> Optional[str]:
         """提取话题关键词"""
-        topic_keywords = {
-            "选车": ["车", "汽车", "买车", "选车", "suv", "轿车", "新能源车"],
-            "打车": ["打车", "滴滴", "高德", " taxi", "专车", "快车"],
-            "咖啡": ["咖啡", "拿铁", "星巴克", "瑞幸"],
-            "美食": ["餐厅", "美食", "吃的", "推荐菜", "吃饭", "吃"],
-            "家具": ["家具", "沙发", "床", "桌子", "椅子", "家居"],
-            "应用": ["app", "软件", "应用", "平台"],
-            "购物": ["买", "购物", "价格", "便宜"],
-            "旅游": ["旅游", "景点", "酒店", "机票"],
-        }
         text_lower = text.lower()
-        for topic, keywords in topic_keywords.items():
+        for topic, keywords in self._topic_keywords.items():
             if any(kw in text_lower for kw in keywords):
                 return topic
+        # 过滤掉纯评论/附和的短语
+        comment_phrases = ["挺好的", "非常好", "太好了", "还可以", "挺好的呀", "不错啊", "真的吗", "是吗", "不错", "挺好", "还行", "好"]
+        backchannel_phrases = ["好的", "好的呀", "好的呢", "嗯嗯", "明白", "了解", "收到", "可以", "行的", "好滴", "嗯", "对", "是"]
+        complaint_phrases = ["太慢了", "好慢", "太慢了吧", "好慢啊", "等好久了", "太久了"]
+        status_query_phrases = ["进度怎么样了", "进度如何", "怎么样了", "好了吗", "完成没", "有人在吗", "有人在不在", "人呢"]
+        # 过滤掉预算/数字类澄清回答（如"20 万左右"、"15 万"、"5000 块"）
+        if re.search(r'\d+\s*万', text) or re.search(r'\d+\s*(块 | 元)', text):
+            return None
+        if text_lower in comment_phrases or text_lower in backchannel_phrases or text_lower in complaint_phrases or text_lower in status_query_phrases:
+            return None
+        # 提取问题中的关键词作为主题
+        words = re.findall(r'[\u4e00-\u9fa5]{2,4}', text)
+        if words:
+            return words[0]
         return None
+
+    def _is_topic_switch(self, new_input: str) -> bool:
+        """
+        检测是否是话题切换
+
+        规则：
+        1. 当前有明确话题，新输入指向不同话题 → 话题切换
+        2. 当前有话题，新输入是短动作词（如"吃饭"）→ 话题切换
+        3. 话题相同 → 不是切换
+        4. 附和/评论类短语 → 不是切换
+        """
+        if not self._current_topic:
+            return False
+
+        text = new_input.lower().strip()
+
+        # 先排除附和/评论类短语
+        backchannel_phrases = ["好的", "好的呀", "好的呢", "嗯嗯", "明白", "了解", "收到", "可以", "好滴", "嗯", "对", "是"]
+        comment_phrases = ["挺好的", "非常好", "太好了", "还可以", "不错啊", "真的吗", "是吗", "不错", "挺好", "还行", "好"]
+        complaint_phrases = ["太慢了", "好慢", "太慢了吧", "好慢啊", "等好久了", "太久了"]
+        status_query_phrases = ["进度怎么样了", "进度如何", "怎么样了", "好了吗", "完成没", "有人在吗", "有人在不在", "人呢"]
+        # 排除预算/数字类澄清回答
+        if re.search(r'\d+\s*万', text) or re.search(r'\d+\s*(块 | 元)', text):
+            return False
+        if text in backchannel_phrases or text in comment_phrases or text in complaint_phrases or text in status_query_phrases:
+            return False
+
+        new_topic = self._extract_topic(new_input)
+
+        # 新输入有明确话题且与当前话题不同 → 话题切换
+        if new_topic and new_topic != self._current_topic:
+            return True
+
+        # 短文本（<=4 字）+ 动作词 → 可能是新话题
+        # 例如：当前任务是选车，用户说"吃饭" → 切换
+        if len(text) <= 4:
+            action_words = ["吃", "喝", "买", "选", "定", "订", "看", "玩"]
+            has_action = any(kw in text for kw in action_words)
+            # 有新动作且没有当前话题的关键词 → 话题切换
+            if has_action and not new_topic:
+                current_keywords = self._topic_keywords.get(self._current_topic, [])
+                has_current_topic_kw = any(kw in text for kw in current_keywords)
+                if not has_current_topic_kw:
+                    return True
+
+        return False
 
 
 class TalkerThinkerApp:
