@@ -51,7 +51,7 @@ class TestTalkerAgent:
             context={"messages": [], "user_preferences": {"taste": "喜欢吃辣"}},
             mode="quick",
         )
-        assert "用户长期偏好" in prompt
+        assert "已知用户偏好" in prompt or "用户长期偏好" in prompt
         assert "喜欢吃辣" in prompt
 
 

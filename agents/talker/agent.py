@@ -10,6 +10,8 @@ from typing import Any, AsyncIterator, Callable, Dict, List, Optional
 from config import settings
 from context.types import Message, ResponseLayer, TaskComplexity
 from agents.llm_client import LLMClient, StreamMetrics, create_llm_client
+from prompts.manager import PromptMgr
+from prompts.injectors.context_injector import ContextInjector
 
 
 @dataclass
@@ -79,6 +81,10 @@ class TalkerAgent:
             "delegated_to_thinker": 0,
             "errors": 0,
         }
+
+        # 初始化 PromptMgr
+        self.prompt_mgr = PromptMgr(template_dir="prompts/templates")
+        self.prompt_mgr.register_injector(ContextInjector())
 
     def set_progress_callback(self, callback: Callable) -> None:
         """设置进度回调函数"""
@@ -346,21 +352,37 @@ class TalkerAgent:
         context: Optional[Dict[str, Any]] = None,
     ) -> str:
         """
-        根据上下文生成智能进度播报
+        根据上下文生成智能进度播报（使用 PromptMgr）
 
         Args:
             original_query: 用户原始问题
-            recent_output: Thinker最近的输出内容
+            recent_output: Thinker 最近的输出内容
             elapsed_time: 已耗时（秒）
             context: 上下文
 
         Returns:
             str: 进度播报消息
         """
-        # 截取最近的输出（避免prompt过长）
+        # 截取最近的输出（避免 prompt 过长）
         recent_snippet = recent_output[-500:] if len(recent_output) > 500 else recent_output
 
-        prompt = f"""你是一个友好的助手，正在帮用户处理一个复杂任务。请根据当前进度，用一句话（不超过30字）向用户播报当前进度。
+        # 格式化已耗时
+        time_str = f"{elapsed_time:.0f}"
+
+        # 构建模板变量
+        template_vars = {
+            "original_query": original_query,
+            "recent_output": recent_snippet,
+            "elapsed_time": time_str,
+        }
+
+        # 构建 prompt（使用模板或 fallback）
+        prompt = ""
+        try:
+            prompt = self.prompt_mgr.build_prompt("talker/progress_broadcast", template_vars)
+        except (ValueError, KeyError):
+            # Fallback 到硬编码 prompt
+            prompt = f"""你是一个友好的助手，正在帮用户处理一个复杂任务。请根据当前进度，用一句话（不超过 30 字）向用户播报当前进度。
 
 用户问题：{original_query}
 
@@ -372,7 +394,7 @@ class TalkerAgent:
 要求：
 1. 根据实际处理内容描述进度，不要重复
 2. 语气自然、友好
-3. 简洁（不超过30字）
+3. 简洁（不超过 30 字）
 4. 如果正在规划，说"正在规划..."
 5. 如果正在分析，说"正在分析..."
 6. 如果正在对比，说"正在对比..."
@@ -380,15 +402,16 @@ class TalkerAgent:
 
 只输出一句话，不要解释："""
 
+        # 调用 LLM 生成播报内容
         try:
-            # 使用快速响应（低token、低温度）
+            # 使用快速响应（低 token、低温度）
             response = await asyncio.wait_for(
                 self.llm.generate(
                     prompt,
                     max_tokens=50,
                     temperature=0.3,
                 ),
-                timeout=2.0  # 2秒超时
+                timeout=2.0  # 2 秒超时
             )
             return response.strip()
         except asyncio.TimeoutError:
@@ -459,22 +482,91 @@ class TalkerAgent:
         context: Optional[Dict[str, Any]] = None,
         mode: str = "quick",
     ) -> str:
-        """构建响应Prompt"""
+        """构建响应 Prompt（使用 PromptMgr）"""
         # 检测是否是记忆相关问题
         memory_keywords = ["记得", "说过", "问过", "刚才", "之前", "上次", "历史"]
         is_memory_query = any(kw in user_input for kw in memory_keywords)
 
-        # 构建对话历史（所有模式都使用）
-        context_str = ""
-        if context and "messages" in context:
-            # 记忆相关问题使用更多历史
-            history_limit = 15 if is_memory_query else 5
-            recent = context["messages"][-history_limit:] if len(context["messages"]) > 1 else []
-            if recent:
-                context_str = "\n对话历史：\n" + "\n".join([
-                    f"[{'用户' if m.get('role') == 'user' else '助手'}]: {m.get('content', '')[:200]}"
-                    for m in recent
-                ]) + "\n"
+        # 构建对话历史
+        context_str = self._build_context_str(context, is_memory_query)
+
+        # 构建 system prompt（在代码中处理条件逻辑）
+        if mode == "quick":
+            if is_memory_query:
+                system_prompt = """你是一个友好、高效的对话助手。
+用户正在询问之前的对话内容。请仔细查看对话历史，准确回忆用户之前提到的内容。
+如果找到了相关内容，直接告诉用户；如果没找到，诚实地说明。"""
+            else:
+                system_prompt = "你是一个友好、高效的对话助手。请简洁地回复用户。"
+        elif mode == "medium":
+            if is_memory_query:
+                system_prompt = """你是一个友好的对话助手。
+用户正在询问之前的对话内容。请仔细查看对话历史，准确回忆并总结用户之前提到的内容。"""
+            else:
+                system_prompt = "你是一个友好的对话助手。"
+        else:
+            system_prompt = "你是一个友好的对话助手。"
+
+        # 构建模板变量（包含完整的 context 供注入器使用）
+        template_vars = {
+            "user_input": user_input,
+            "context_str": context_str,
+            "system_prompt": system_prompt,
+        }
+        
+        # 合并 context 以便注入器可以访问 user_preferences 等
+        if context:
+            template_vars.update(context)
+
+        # 根据模式选择模板
+        template_map = {
+            "quick": "talker/quick_response",
+            "medium": "talker/medium_response",
+            "clarification": "talker/clarification",
+        }
+
+        template_name = template_map.get(mode, "talker/quick_response")
+
+        try:
+            return self.prompt_mgr.build_prompt(template_name, template_vars)
+        except (ValueError, KeyError) as e:
+            # 模板不存在时使用 fallback
+            print(f"使用 PromptMgr 失败：{e}，使用 fallback")
+            return self._build_response_prompt_fallback(user_input, context, mode)
+
+    def _build_context_str(
+        self,
+        context: Optional[Dict[str, Any]],
+        is_memory_query: bool = False,
+    ) -> str:
+        """构建对话历史字符串"""
+        if not context or "messages" not in context:
+            return ""
+
+        # 记忆相关问题使用更多历史
+        history_limit = 15 if is_memory_query else 5
+        recent = context["messages"][-history_limit:] if len(context["messages"]) > 1 else []
+        if recent:
+            return "\n对话历史：\n" + "\n".join([
+                f"[{'用户' if m.get('role') == 'user' else '助手'}]: {m.get('content', '')[:200]}"
+                for m in recent
+            ]) + "\n"
+        return ""
+
+    def _build_response_prompt_fallback(
+        self,
+        user_input: str,
+        context: Optional[Dict[str, Any]] = None,
+        mode: str = "quick",
+    ) -> str:
+        """Fallback 方法：当模板不可用时使用"""
+        # 检测是否是记忆相关问题
+        memory_keywords = ["记得", "说过", "问过", "刚才", "之前", "上次", "历史"]
+        is_memory_query = any(kw in user_input for kw in memory_keywords)
+
+        # 构建对话历史
+        context_str = self._build_context_str(context, is_memory_query)
+
         pref_str = ""
         if context and context.get("user_preferences"):
             prefs = context.get("user_preferences", {})
@@ -483,7 +575,6 @@ class TalkerAgent:
                 pref_str = "\n用户长期偏好：" + "；".join(pref_items) + "\n"
 
         if mode == "quick":
-            # 根据问题类型调整系统提示
             if is_memory_query:
                 system_hint = """你是一个友好、高效的对话助手。
 用户正在询问之前的对话内容。请仔细查看对话历史，准确回忆用户之前提到的内容。
@@ -492,11 +583,11 @@ class TalkerAgent:
                 system_hint = "你是一个友好、高效的对话助手。请简洁地回复用户。"
 
             return f"""{system_hint}
-            {context_str}{pref_str}
-            当前用户消息：{user_input}
+{context_str}{pref_str}
+当前用户消息：{user_input}
 
 要求：
-1. 回复简洁（不超过100字）
+1. 回复简洁（不超过 100 字）
 2. 语气友好
 3. 结合对话历史理解用户意图
 4. 直接回答问题
@@ -511,12 +602,12 @@ class TalkerAgent:
                 system_hint = "你是一个友好的对话助手。"
 
             return f"""{system_hint}
-            {context_str}{pref_str}
-            当前用户问题：{user_input}
+{context_str}{pref_str}
+当前用户问题：{user_input}
 
-请提供一个有帮助的回答（200字以内）："""
+请提供一个有帮助的回答（200 字以内）："""
 
-        return f"用户：{user_input}\n\n请回复："
+        return f"用户：{user_input}\n\n请回复："""
 
     async def broadcast_progress(
         self,

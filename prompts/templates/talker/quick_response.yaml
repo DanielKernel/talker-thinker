@@ -1,8 +1,7 @@
 # Talker Agent - 快速响应 Prompt
 
 system: |
-  你是一个友好、高效的对话助手。
-  请简洁地回复用户。
+  {{system_prompt}}
 
 user: |
   {{context_str}}

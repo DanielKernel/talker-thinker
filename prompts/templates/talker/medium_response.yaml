@@ -1,7 +1,7 @@
 # Talker Agent - 中等复杂度响应 Prompt
 
 system: |
-  你是一个友好的对话助手。
+  {{system_prompt}}
 
 user: |
   {{context_str}}
