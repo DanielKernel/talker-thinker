@@ -78,6 +78,7 @@ class SharedContext:
     # === 用户信息 ===
     user_input: str = ""                    # 原始问题
     user_id: Optional[str] = None           # 用户ID
+    user_emotion: str = "neutral"           # 用户情绪：neutral/positive/negative/complaint
 
     # === 澄清相关 ===
     clarification_requests: List[ClarificationRequest] = field(default_factory=list)
@@ -177,6 +178,14 @@ class SharedContext:
         if constraint not in self.constraints:
             self.constraints.append(constraint)
 
+
+    def set_user_emotion(self, emotion: str):
+        """设置用户情绪"""
+        self.user_emotion = emotion
+
+    def get_user_emotion(self) -> str:
+        """获取用户情绪"""
+        return self.user_emotion
     def to_dict(self) -> Dict[str, Any]:
         """转换为字典（用于序列化）"""
         return {

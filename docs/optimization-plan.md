@@ -1029,3 +1029,46 @@ async def _collaboration_handoff(self, user_input, context, ...):
 ### Agent协作
 - [LangGraph Platform](https://www.langchain.com/langgraph) - 原生token-by-token流式输出
 - [豆包AI助手](https://baike.baidu.com/item/%E8%B1%86%E5%8C%85%E5%A4%A7%E6%A8%A1%E5%9E%8B/64418493) - 低时延可打断语音对话
+### 2026-02-21（第六次更新）- Thinker 输出劫持与情绪感知播报
+**新增优化**：
+1. **Thinker 输出劫持**：Thinker 的阶段标记输出（如`[步骤 1] xxx`、`[思考] xxx`、`[规划] xxx`）由 Talker 重新组织语言后显示
+   - 新增 `_try_rewrite_thinker_output()` 方法检测并重写 Thinker 输出
+   - 步骤标记 → "执行步骤 X/Y: 步骤名称（进度条）"
+   - 思考标记 → "正在 xxx，请稍候..."
+   - 规划标记 → "已理解任务目标：xxx"
+   - 答案标记 → 保留 Thinker 标识直接显示
+
+2. **进度百分比可视化**：新增进度条显示
+   - 新增 `_format_progress_bar()` 方法生成 Unicode 进度条
+   - 格式：`[████████████░░░░░░░░] 60%`
+   - 应用于 heartbeat 播报和步骤执行播报
+
+3. **情绪感知播报**：根据用户情绪调整播报语气
+   - 新增 `detect_user_emotion()` 函数检测用户情绪（complaint/negative/positive/neutral）
+   - 新增 `_get_emotional_broadcast_suffix()` 方法生成安抚性后缀
+   - 用户抱怨时：使用更安抚的语气（"马上就好~"、"感谢您的耐心！"）
+   - 正常时：标准语气（"请稍候..."、"还需一点时间..."）
+
+**涉及文件**：
+- `orchestrator/coordinator.py`:
+  - 新增 `_try_rewrite_thinker_output()` - Thinker 输出重写
+  - 新增 `_format_progress_bar()` - 进度条生成
+  - 新增 `_get_emotional_broadcast_suffix()` - 情绪化后缀
+  - 修改 heartbeat 播报逻辑 - 使用进度条 + 情绪后缀
+- `context/shared_context.py`:
+  - 新增 `user_emotion` 字段
+  - 新增 `set_user_emotion()` / `get_user_emotion()` 方法
+- `main.py`:
+  - 新增 `detect_user_emotion()` 函数
+  - 修改 `_handle_new_input_during_processing()` - 检测情绪并存储
+
+**预期效果**：
+```
+优化前：
+[16:31:34] Talker: 仍在执行阶段（83s）
+[16:31:50] Talker: 仍在执行阶段（99s）
+
+优化后：
+[16:31:34] Talker: 执行步骤 1/4: 搜索平台基础信息 [█████░░░░░░░░░░░░░] 25%
+[16:31:50] Talker: 步骤 2/4: 搜索价格对比信息 [██████████░░░░░░░░] 50%，还需一点时间...
+```

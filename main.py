@@ -686,6 +686,12 @@ class TalkerThinkerApp:
         intent = self.task_manager.classify_intent(new_input)
         current = self.task_manager.current_input or "您的请求"
 
+        # 检测用户情绪并存储到 SharedContext
+        emotion = detect_user_emotion(new_input)
+        shared = self._get_shared_context(session_id)
+        if shared:
+            shared.set_user_emotion(emotion)
+
         if intent == UserIntent.COMMENT:
             # 评论/感叹，不打断任务，但Talker应该简短回应
             text = new_input.lower()
@@ -1009,3 +1015,47 @@ def main():
 
 if __name__ == "__main__":
     main()
+
+
+# === 用户情绪检测工具函数 ===
+def detect_user_emotion(text: str) -> str:
+    """
+    检测用户情绪状态
+
+    Args:
+        text: 用户输入文本
+
+    Returns:
+        情绪标签：'complaint'（抱怨）、'neutral'（中性）、'positive'（正面）、'negative'（负面）
+    """
+    text_lower = text.lower().strip()
+
+    # 抱怨/不满情绪
+    complaint_patterns = [
+        "太慢", "好慢", "慢死了", "太久了", "等了好久", "怎么这么慢",
+        "太乱", "好乱", "乱七八糟", "听不懂", "不明白",
+        "没用", "不行", "不好", "太差了", "真差",
+        "你在干啥", "你在干嘛", "怎么没反应", "没回应",
+    ]
+    if any(p in text_lower for p in complaint_patterns):
+        return "complaint"
+
+    # 负面情绪（失望、放弃）
+    negative_patterns = [
+        "算了", "不要了", "不用了", "不弄了", "不搞了",
+        "失望", "无语", "唉", "哎",
+    ]
+    if any(p in text_lower for p in negative_patterns):
+        return "negative"
+
+    # 正面情绪
+    positive_patterns = [
+        "太好了", "很好", "不错", "挺好", "真棒", "厉害",
+        "谢谢", "感谢", "辛苦了", "好的", "好的谢谢",
+        "哈哈", "嘻嘻", "笑死", "有趣",
+    ]
+    if any(p in text_lower for p in positive_patterns):
+        return "positive"
+
+    # 默认中性
+    return "neutral"

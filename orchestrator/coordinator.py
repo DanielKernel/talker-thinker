@@ -345,6 +345,132 @@ class Orchestrator:
         # 默认消息
         return f"处理中 ({elapsed_time:.0f}s)...", "处理中"
 
+    def _try_rewrite_thinker_output(
+        self,
+        chunk: str,
+        stage: ThinkerStage,
+        current_step: int,
+        total_steps: int,
+        step_desc: str,
+        elapsed: float,
+    ) -> Optional[str]:
+        """
+        尝试将 Thinker 的阶段标记输出转换为 Talker 风格的播报
+
+        检测 Thinker 输出的阶段标记（如"[步骤 1] xxx"、"[思考] xxx"、"[规划] xxx"），
+        由 Talker 重新组织语言后显示，使用户感知更一致、更友好。
+
+        Returns:
+            Optional[str]: 如果检测到阶段标记则返回重写后的播报，否则返回 None
+        """
+        chunk_stripped = chunk.strip()
+
+        # === 检测 Thinker 阶段标记 ===
+
+        # [步骤 X] 步骤名称...
+        step_match = re.match(r'\[步骤 (\d+)\]\s*([^\.]+)\.\.\.', chunk_stripped)
+        if step_match and total_steps > 0:
+            step_num = int(step_match.group(1))
+            step_name = step_match.group(2)
+            progress_pct = int((step_num / total_steps) * 100)
+            return f"执行步骤{step_num}/{total_steps}: {step_name}（{progress_pct}%）"
+
+        # [思考] 正在 xxx...
+        thinking_match = re.match(r'\[思考\]\s*(.+)\.\.\.', chunk_stripped)
+        if thinking_match:
+            action = thinking_match.group(1)
+            # 根据阶段给出更友好的描述
+            if stage == ThinkerStage.ANALYZING:
+                return f"正在{action}，请稍候..."
+            elif stage == ThinkerStage.PLANNING:
+                return f"已理解需求，{action}..."
+            elif stage == ThinkerStage.EXECUTING:
+                return f"{action}，进度{current_step}/{total_steps}..."
+            else:
+                return f"正在{action}..."
+
+        # [规划] 任务目标：xxx
+        plan_target_match = re.match(r'\[规划\]\s*任务目标:\s*(.+)', chunk_stripped)
+        if plan_target_match:
+            target = plan_target_match.group(1)
+            return f"已理解任务目标：{target}"
+
+        # [规划] 共 X 个步骤
+        plan_steps_match = re.match(r'\[规划\]\s*共 (\d+) 个步骤', chunk_stripped)
+        if plan_steps_match:
+            num_steps = int(plan_steps_match.group(1))
+            return f"任务已分解为{num_steps}个步骤，开始执行..."
+
+        # ✓ 完成 (Xms)
+        check_done_match = re.match(r'✓\s*完成\s*\((\d+)ms\)', chunk_stripped)
+        if check_done_match:
+            # 步骤完成标记，静默处理或显示进度
+            if current_step < total_steps:
+                return f"步骤{current_step}/{total_steps}完成"
+            return None  # 最后一步完成，让最终答案来处理
+
+        # [答案] xxx
+        answer_match = re.match(r'\[答案\]\s*(.+)', chunk_stripped)
+        if answer_match:
+            # 最终答案，保留 Thinker 标识
+            return None
+
+        # 未检测到阶段标记，返回 None 让原始输出显示
+        return None
+
+
+
+    def _format_progress_bar(self, current: int, total: int, width: int = 20) -> str:
+        """
+        生成进度条字符串
+
+        Args:
+            current: 当前步骤
+            total: 总步骤数
+            width: 进度条宽度（字符数）
+
+        Returns:
+            进度条字符串，如：[████████████░░░░░░░░] 60%
+        """
+        if total <= 0:
+            return ""
+
+        percent = current / total
+        filled = int(width * percent)
+        empty = width - filled
+
+        # 使用 Unicode 块字符创建进度条
+        bar = "█" * filled + "░" * empty
+        return f"[{bar}] {int(percent * 100)}%"
+
+    def _get_emotional_broadcast_suffix(self, elapsed: float, user_complaint: bool = False) -> str:
+        """
+        根据已耗时和用户情绪生成播报后缀（安抚性话语）
+
+        Args:
+            elapsed: 已用时间（秒）
+            user_complaint: 用户是否表达了不满
+
+        Returns:
+            安抚性后缀字符串
+        """
+        if user_complaint:
+            # 用户有抱怨，使用更安抚的语气
+            if elapsed < 30:
+                return "，马上就好~"
+            elif elapsed < 60:
+                return "，再给我一点时间~"
+            else:
+                return "，这个任务确实有点复杂，感谢您的耐心！"
+        else:
+            # 正常语气
+            if elapsed < 30:
+                return "，请稍候..."
+            elif elapsed < 60:
+                return "，还需一点时间..."
+            else:
+                return "，复杂任务需要更多时间，感谢等待~"
+
     def _extract_topic(self, query: str) -> str:
         """从用户问题中提取主题"""
         query_lower = query.lower()
@@ -1044,16 +1170,17 @@ class Orchestrator:
                             ThinkerStage.COMPLETED: "收尾",
                         }.get(new_stage, "处理")
 
-                        # 优先显示详细进度信息
+                        # 优先显示详细进度信息（带进度条）
                         if total_steps > 0 and current_step > 0:
                             progress_pct = int((current_step / total_steps) * 100)
+                            progress_bar = self._format_progress_bar(current_step, total_steps)
                             if step_desc:
-                                # 有步骤描述：显示具体步骤信息
-                                broadcast_msg = f"步骤{current_step}/{total_steps}: {step_desc}（{progress_pct}%）"
+                                # 有步骤描述：显示具体步骤信息 + 进度条
+                                broadcast_msg = f"步骤{current_step}/{total_steps}: {step_desc} {progress_bar}"
                                 msg_template = f"step_{current_step}_{total_steps}"
                             else:
-                                # 无步骤描述：显示进度百分比
-                                broadcast_msg = f"执行中：{current_step}/{total_steps} 步（{progress_pct}%）"
+                                # 无步骤描述：显示进度条
+                                broadcast_msg = f"执行中 {progress_bar}（{current_step}/{total_steps} 步）"
                                 msg_template = f"progress_{current_step}_{total_steps}"
                         elif shared and shared.thinker_progress.partial_results:
                             # 有中间结果：显示最新结果
@@ -1062,11 +1189,16 @@ class Orchestrator:
                                 broadcast_msg = f"{stage_zh}中：{latest}"
                                 msg_template = f"result_{hash(latest) % 1000}"
                             else:
-                                broadcast_msg = f"仍在{stage_zh}阶段（{elapsed:.0f}s）"
+                                # 有中间结果但太长，显示时间 + 安抚
+                                user_complaint = shared and shared.get_user_emotion() == "complaint"
+                                suffix = self._get_emotional_broadcast_suffix(elapsed, user_complaint=user_complaint)
+                                broadcast_msg = f"仍在{stage_zh}阶段（{elapsed:.0f}s）{suffix}"
                                 msg_template = f"heartbeat_{new_stage.value}_{int(elapsed // 15)}"
                         else:
-                            # 降级：显示时间和阶段
-                            broadcast_msg = f"仍在{stage_zh}阶段（{elapsed:.0f}s）"
+                            # 降级：显示时间和阶段 + 安抚
+                            user_complaint = shared and shared.get_user_emotion() == "complaint"
+                            suffix = self._get_emotional_broadcast_suffix(elapsed, user_complaint=user_complaint)
+                            broadcast_msg = f"仍在{stage_zh}阶段（{elapsed:.0f}s）{suffix}"
                             msg_template = f"heartbeat_{new_stage.value}_{int(elapsed // 15)}"
                     else:
                         broadcast_msg, msg_template = self._generate_stage_broadcast(
@@ -1123,13 +1255,26 @@ class Orchestrator:
                 self._progress_state.total_steps = total_steps
                 self._progress_state.last_content_hash = f"{new_stage.value}:{current_step}:{total_steps}:{step_desc[:20]}"
 
-                # Thinker输出加时间戳
+                # === Thinker 输出劫持：Talker 重新组织语言 ===
+                # 检测 Thinker 的阶段标记输出，由 Talker 重新组织后显示
                 if chunk.strip():
-                    if not thinker_first_token_shown:
-                        ts = format_timestamp(current_time)
-                        yield f"\n[{ts}] Thinker: "
-                        thinker_first_token_shown = True
-                    yield chunk
+                    talker_rewrite = self._try_rewrite_thinker_output(
+                        chunk, new_stage, current_step, total_steps, step_desc, elapsed
+                    )
+                    if talker_rewrite:
+                        # Talker 劫持输出，重新组织语言
+                        if not thinker_first_token_shown:
+                            ts = format_timestamp(current_time)
+                            yield f"\n[{ts}] "
+                            thinker_first_token_shown = True
+                        yield talker_rewrite
+                    else:
+                        # 非阶段标记输出，直接显示（保留 Thinker 标识）
+                        if not thinker_first_token_shown:
+                            ts = format_timestamp(current_time)
+                            yield f"\n[{ts}] Thinker: "
+                            thinker_first_token_shown = True
+                        yield chunk
             else:
                 # 没有新输出时短暂等待
                 await asyncio.sleep(0.05)
