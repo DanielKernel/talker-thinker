@@ -1,5 +1,5 @@
 """
-Talker-Thinker 双Agent系统主入口
+Talker-Thinker 双 Agent 系统主入口
 """
 import argparse
 import asyncio
@@ -9,6 +9,8 @@ import sys
 import time
 from enum import Enum
 from typing import Optional
+
+from typing import Any, Dict, Optional
 
 from config import settings
 from orchestrator.coordinator import Orchestrator
@@ -149,7 +151,7 @@ class TaskManager:
         # 将当前任务标记为完成
         if self._current_topic and hasattr(self, '_completed_tasks'):
             pass  # 可以在这里添加完成记录
-        
+
         self._current_task = None
         self._current_input = None
         self._is_processing = False
@@ -207,7 +209,14 @@ class TaskManager:
                 await self._current_task
             except asyncio.CancelledError:
                 pass
-            self.end_task()
+            # 不立即调用 end_task()，保留 current_input 用于状态查询
+            # 只设置_is_processing 为 False，但保留其他状态
+            self._is_processing = False
+            # 等待一小段时间让共享上下文同步
+            await asyncio.sleep(0.5)
+            # 然后清理剩余状态，但保留 current_input
+            self._current_task = None
+            self._task_context = None
             return True
         return False
 
@@ -257,13 +266,17 @@ class TaskManager:
             return UserIntent.REPLACE
 
         # === 0.05 明确补充信息（优先于新任务）===
-        # 避免“帮我补充...”被误判为新任务替换
+        # 避免"帮我补充..."被误判为新任务替换
         modify_keywords = [
             "另外", "还有", "加上", "补充", "再加", "也要",
             "或者", "改为", "换成", "最好是", "注意", "顺便",
             "并且", "同时", "补充下", "补充一下",
         ]
-        if any(kw in text for kw in modify_keywords):
+        # 但"还有任务吗"、"还有多少任务"是查询状态，不是补充信息
+        status_exceptions = ["还有任务", "还有多少", "还有几个"]
+        if any(se in text for se in status_exceptions):
+            pass  # 不返回 MODIFY，让后面的 QUERY_STATUS 处理
+        elif any(kw in text for kw in modify_keywords):
             return UserIntent.MODIFY
 
         # === 0.06 上下文补充短句（优先于新任务）===
@@ -290,31 +303,28 @@ class TaskManager:
         # === 1. 检测用户在等待中的疑问/抱怨 ===
         waiting_questions = [
             "有人在", "在吗", "在不在", "人呢", "还在吗",
-            "太慢", "好慢", "怎么这么慢", "等好久了",
+            "太慢", "好慢", "怎么这么慢", "等好久了", "有点慢",
             "好了吗", "怎么样了", "完成没", "进度",
             "有啥信息", "有结果没", "有什么进展", "进展咋样", "信息没",
             "没回应", "没反应", "不回应", "不反应",
             "你在干啥", "你在干嘛", "分析啥", "在做什么",
+            "有任务", "还有任务", "多少任务", "几个任务",
+            "还在处理", "还在做", "还在弄",
         ]
         if any(q in text for q in waiting_questions):
-            # 有语气词或直接是抱怨词/状态查询词 → QUERY_STATUS
-            complaint_words = ["太慢", "好慢", "等好久了", "怎么这么慢"]
-            status_words = ["进度", "怎么样了", "好了吗", "完成没", "怎么样"]
-            if any(q in text for q in ["吗", "？", "?", "在", "没", "啥", "进展"]) or any(c in text for c in complaint_words) or any(s in text for s in status_words):
-                return UserIntent.QUERY_STATUS
-            return UserIntent.COMMENT
+            return UserIntent.QUERY_STATUS
 
-        # === 2. 检测附和/应答（不打断，但需要明确是附和）===
+        # === 2. 检测附和/应答（不打断任务）===
         backchannel_patterns = [
             "嗯", "嗯嗯", "好的", "好", "行", "可以", "对", "是",
             "ok", "okay", "yes", "right", "明白", "了解", "收到",
         ]
-        # 注意：只有明确是附和词才返回BACKCHANNEL
-        # 不再用len(text)<=2来判断，因为"取消"也是2个字
+        # 注意：只有明确是附和词才返回 BACKCHANNEL
+        # 不再用 len(text)<=2 来判断，因为"取消"也是 2 个字
         if text in backchannel_patterns:
             return UserIntent.BACKCHANNEL
 
-        # === 2.1 短文本新任务检测（避免“吃饭”被误判）===
+        # === 2.1 短文本新任务检测（避免"吃饭"被误判）===
         if len(text) <= 4 and self._is_likely_new_task(text):
             return UserIntent.REPLACE
 
@@ -377,7 +387,7 @@ class TaskManager:
         return UserIntent.COMMENT
 
     def extract_replacement_input(self, text: str) -> str:
-        """从“取消+新任务”的复合输入中提取新任务意图。"""
+        """从"取消 + 新任务"的复合输入中提取新任务意图。"""
         chunks = [c.strip() for c in re.split(r"[，,。；;！!？?]", text) if c.strip()]
         if not chunks:
             return text
@@ -444,15 +454,15 @@ class TaskManager:
         timeout: float = 1.0
     ) -> UserIntent:
         """
-        使用LLM进行更智能的意图分类
+        使用 LLM 进行更智能的意图分类
 
         关键改进：
         - 区分评论/感叹（不打断）和取消请求（打断）
         - 考虑当前任务上下文
 
         Args:
-            new_input: 用户新输入
-            llm_client: LLM客户端
+            new_input: 用户输入
+            llm_client: LLM 客户端
             timeout: 超时时间（秒）
 
         Returns:
@@ -471,13 +481,13 @@ class TaskManager:
 2. BACKCHANNEL - 简单附和（如"嗯"、"好的"、"明白"）
 3. MODIFY - 补充当前任务的信息（如"再加上..."、"还有..."）
 4. QUERY_STATUS - 查询进度（如"好了吗"、"怎么样"）
-5. REPLACE - 取消当前任务开始新任务（如"算了"、"不用了"、"帮我查xxx"）
+5. REPLACE - 取消当前任务开始新任务（如"算了"、"不用了"、"帮我查 xxx"）
 6. CONTINUE - 回答系统的澄清问题
 
 重要规则：
-- 如果只是评论或感叹，返回COMMENT，不要误判为REPLACE
-- 如果是简短的应答，返回BACKCHANNEL
-- 只有明确表示取消或提出全新问题才返回REPLACE
+- 如果只是评论或感叹，返回 COMMENT，不要误判为 REPLACE
+- 如果是简短的应答，返回 BACKCHANNEL
+- 只有明确表示取消或提出全新问题才返回 REPLACE
 
 只返回一个意图类型，不要解释。"""
 
@@ -541,6 +551,7 @@ class TaskManager:
         2. 当前有话题，新输入是短动作词（如"吃饭"）→ 话题切换
         3. 话题相同 → 不是切换
         4. 附和/评论类短语 → 不是切换
+        5. 状态查询类短语 → 不是切换
         """
         if not self._current_topic:
             return False
@@ -552,10 +563,15 @@ class TaskManager:
         comment_phrases = ["挺好的", "非常好", "太好了", "还可以", "不错啊", "真的吗", "是吗", "不错", "挺好", "还行", "好"]
         complaint_phrases = ["太慢了", "好慢", "太慢了吧", "好慢啊", "等好久了", "太久了"]
         status_query_phrases = ["进度怎么样了", "进度如何", "怎么样了", "好了吗", "完成没", "有人在吗", "有人在不在", "人呢"]
+        # 新增：状态查询相关短语（不打断任务）
+        status_queries = [
+            "有点慢", "有啥信息", "有啥信息没", "你在干啥", "你在干嘛", "在干啥", "在干嘛",
+            "有任务", "还有任务", "多少任务", "几个任务",
+        ]
         # 排除预算/数字类澄清回答
         if re.search(r'\d+\s*万', text) or re.search(r'\d+\s*(块 | 元)', text):
             return False
-        if text in backchannel_phrases or text in comment_phrases or text in complaint_phrases or text in status_query_phrases:
+        if text in backchannel_phrases or text in comment_phrases or text in complaint_phrases or text in status_query_phrases or text in status_queries:
             return False
 
         new_topic = self._extract_topic(new_input)
@@ -581,9 +597,9 @@ class TaskManager:
 
 class TalkerThinkerApp:
     """
-    Talker-Thinker应用
+    Talker-Thinker 应用
 
-    提供命令行和API两种使用方式
+    提供命令行和 API 两种使用方式
     支持全双工交互：用户可在处理过程中发送新消息
     """
 
@@ -591,12 +607,15 @@ class TalkerThinkerApp:
         self.orchestrator: Optional[Orchestrator] = None
         self.metrics = get_metrics_collector()
         self.task_manager = TaskManager()
+        # 确认机制相关属性
+        self._pending_new_task: Optional[str] = None  # 待确认的新任务
+        self._awaiting_confirmation: bool = False     # 是否等待确认
 
     async def initialize(self) -> None:
         """初始化应用"""
         logger.info("Initializing Talker-Thinker system...")
 
-        # 创建Orchestrator
+        # 创建 Orchestrator
         self.orchestrator = Orchestrator()
 
         # 设置回调
@@ -617,7 +636,7 @@ class TalkerThinkerApp:
         self.metrics.counter("responses_total")
 
     async def _on_handoff(self, handoff) -> None:
-        """Handoff回调"""
+        """Handoff 回调"""
         logger.log_handoff(
             handoff.from_agent,
             handoff.to_agent,
@@ -643,7 +662,7 @@ class TalkerThinkerApp:
 
         Args:
             user_input: 用户输入
-            session_id: 会话ID（可选）
+            session_id: 会话 ID（可选）
             received_time: 消息接收时间（可选）
 
         Returns:
@@ -665,7 +684,7 @@ class TalkerThinkerApp:
                 if first_token_time is None and chunk.strip():
                     first_token_time = time.time()
                 result_chunks.append(chunk)
-                # 实时输出（用于CLI模式）
+                # 实时输出（用于 CLI 模式）
                 print(chunk, end="", flush=True)
         except asyncio.CancelledError:
             # 任务被取消
@@ -709,27 +728,55 @@ class TalkerThinkerApp:
             pass
 
     def _build_status_reply(self, session_id: str, current: str, elapsed: float) -> str:
-        """基于SharedContext构建状态反馈。"""
+        """基于 SharedContext 构建状态反馈。"""
         shared = self._get_shared_context(session_id)
-        if not shared:
-            return f"\n[Talker] 正在处理「{current[:30]}...」，已用时{elapsed:.0f}秒，请稍候"
-        progress = shared.thinker_progress
-        stage_map = {
-            "idle": "准备中",
-            "analyzing": "分析需求中",
-            "planning": "规划方案中",
-            "executing": "执行步骤中",
-            "synthesizing": "整合答案中",
-            "completed": "已完成",
-        }
-        stage_text = stage_map.get(progress.current_stage, "处理中")
-        latest = progress.partial_results[-1] if progress.partial_results else ""
-        if progress.total_steps > 0 and progress.current_step > 0:
-            step_text = f"（第{progress.current_step}/{progress.total_steps}步）"
-        else:
-            step_text = ""
-        detail = f"，当前：{latest}" if latest else ""
-        return f"\n[Talker] 正在处理「{current[:26]}...」{step_text}，{stage_text}，已用时{elapsed:.0f}秒{detail}"
+
+        # 优先检查共享上下文中的 Thinker 状态（更可靠）
+        if shared and shared.thinker_progress.current_stage != "idle":
+            # Thinker 仍在执行，显示进度
+            progress = shared.thinker_progress
+            stage_map = {
+                "idle": "准备中",
+                "analyzing": "分析需求中",
+                "planning": "规划方案中",
+                "executing": "执行步骤中",
+                "synthesizing": "整合答案中",
+                "completed": "已完成",
+            }
+            stage_text = stage_map.get(progress.current_stage, "处理中")
+            latest = progress.partial_results[-1] if progress.partial_results else ""
+            if progress.total_steps > 0 and progress.current_step > 0:
+                step_text = f"（第{progress.current_step}/{progress.total_steps}步）"
+            else:
+                step_text = ""
+            detail = f"，当前：{latest}" if latest else ""
+            return f"\n[Talker] 正在处理「{current[:26] if current else '任务'}...」{step_text}，{stage_text}，已用时{elapsed:.0f}秒{detail}"
+
+        # 即使 stage 为 idle，但如果有中间结果，说明 Thinker 可能刚完成或正在取消中
+        if shared and shared.thinker_progress.partial_results:
+            progress = shared.thinker_progress
+            latest = progress.partial_results[-1] if progress.partial_results else ""
+            if progress.total_steps > 0 and progress.current_step > 0:
+                step_text = f"（第{progress.current_step}/{progress.total_steps}步）"
+            else:
+                step_text = ""
+            detail = f"，当前：{latest}" if latest else ""
+            # 检查是否在取消窗口期
+            if self.task_manager._cancelled:
+                return f"\n[Talker] 任务正在取消中{step_text}，请稍候...{detail}"
+            # Thinker 可能刚完成但仍保留进度信息
+            return f"\n[Talker] 正在处理「{current[:26] if current else '任务'}...」{step_text}，已完成，已用时{elapsed:.0f}秒{detail}"
+
+        # 检查是否在取消窗口期
+        if self.task_manager._cancelled:
+            return "\n[Talker] 任务正在取消中，请稍候..."
+
+        # 如果 task_manager 显示正在处理，但 shared context 还没更新，也显示处理中
+        if self.task_manager.is_processing:
+            return f"\n[Talker] 正在处理「{current[:26] if current else '任务'}...」，已用时{elapsed:.0f}秒，请稍候..."
+
+        # 共享上下文也显示空闲，才认为真的没有任务
+        return "\n[Talker] 目前没有需要处理的任务。如果您有其他需求，请随时告诉我！"
 
     async def _handle_new_input_during_processing(
         self,
@@ -740,12 +787,12 @@ class TalkerThinkerApp:
         处理任务进行中的新输入
 
         关键改进：
-        - COMMENT和BACKCHANNEL不打断任务，但Talker应该回应
-        - 只有REPLACE才真正取消任务
+        - COMMENT 和 BACKCHANNEL 不打断任务，但 Talker 应该回应
+        - 只有 REPLACE 才真正取消任务
         - 用户的问题应该得到实时反馈
 
         Returns:
-            tuple: (是否已处理, 响应内容)
+            tuple: (是否已处理，响应内容)
         """
         interrupt_action, replacement_input = self.task_manager.decide_interrupt_action(new_input)
         intent = self.task_manager.classify_intent(new_input)
@@ -758,7 +805,7 @@ class TalkerThinkerApp:
             shared.set_user_emotion(emotion)
 
         if intent == UserIntent.COMMENT:
-            # 评论/感叹，不打断任务，但Talker应该简短回应
+            # 评论/感叹，不打断任务，但 Talker 应该简短回应
             text = new_input.lower()
             if "慢" in text or "久" in text:
                 return True, "\n[Talker] 抱歉让您久等了，正在加速处理..."
@@ -785,23 +832,47 @@ class TalkerThinkerApp:
 
         elif intent == UserIntent.QUERY_STATUS:
             # 查询状态，给详细反馈（包括任务数量）
-            elapsed = time.time() - self.task_manager.task_start_time
+            shared = self._get_shared_context(session_id)
+            elapsed = time.time() - self.task_manager.task_start_time if self.task_manager.task_start_time else 0
+
+            # 检查 task_manager 是否正在处理任务
+            if self.task_manager.is_processing:
+                # 任务正在处理中，显示进度
+                return True, self._build_status_reply(session_id, current or "任务", elapsed)
+
+            # 检查共享上下文中的 Thinker 状态（优先）
+            if shared and shared.thinker_progress.current_stage != "idle":
+                # Thinker 仍在执行，使用共享上下文的进度信息
+                return True, self._build_status_reply(session_id, current or "任务", elapsed)
+
+            # 检查是否在取消窗口期
+            if self.task_manager._cancelled:
+                return True, "\n[Talker] 任务正在取消中，请稍候..."
+
+            # 检查用户是否询问特定话题的任务（如"你还在处理打车比？"）
+            # 即使 task_manager.is_processing 为 False，但 shared context 可能仍有信息
+            if shared and shared.thinker_progress.partial_results:
+                # 有中间结果，说明 Thinker 可能刚完成或正在取消
+                return True, self._build_status_reply(session_id, current or "任务", elapsed)
+
             # 检查用户是否询问任务数量
-            if "几个任务" in new_input or "多少任务" in new_input or "多少任务" in new_input:
+            if "几个任务" in new_input or "多少任务" in new_input:
                 running_count = self.task_manager.get_running_tasks_count()
                 pending_count = self.task_manager.get_pending_tasks_count()
                 queue_status = self.task_manager.get_task_queue_status()
                 return True, f"\n[Talker] 当前有{running_count}个任务正在执行，{pending_count}个任务在等待。{queue_status}"
-            return True, self._build_status_reply(session_id, current, elapsed)
+
+            # 真的没有任务
+            return True, "\n[Talker] 目前没有需要处理的任务。如果您有其他需求，请随时告诉我！"
 
         elif intent == UserIntent.REPLACE:
             # 新任务请求：先确认，不直接取消
             elapsed = time.time() - self.task_manager.task_start_time
             progress_info = self._get_current_task_progress(session_id)
-            
+
             # 保存待处理的新任务
             self._pending_new_task = replacement_input or new_input.strip()
-            
+
             # 判断是否需要确认（短任务或执行时间<10 秒可直接取消）
             if elapsed < 10 and progress_info.get("percent", 0) < 20:
                 # 任务刚开始，直接取消
@@ -822,7 +893,7 @@ class TalkerThinkerApp:
                 await self.task_manager.cancel_current_task()
                 pending_task = self._pending_new_task
                 self._pending_new_task = None
-                return False, "\n[Talker] 好的，已取消当前任务，开始处理新任务..."
+                return True, "\n[Talker] 好的，已取消当前任务，开始处理新任务..."
             elif choice == "queue":
                 # 加入队列逻辑
                 pending_task = self._pending_new_task
@@ -857,7 +928,7 @@ class TalkerThinkerApp:
             if shared:
                 shared.update_intent_with_clarification(new_input)
                 shared.add_constraint(new_input)
-                shared.add_talker_interaction(f"补充信息: {new_input}", "response")
+                shared.add_talker_interaction(f"补充信息：{new_input}", "response")
             return True, f"\n[Talker] 收到补充信息「{new_input[:20]}」，已并入当前任务继续处理..."
 
         elif intent == UserIntent.PAUSE:
@@ -886,11 +957,11 @@ class TalkerThinkerApp:
         await self.initialize()
 
         print("=" * 60)
-        print("Talker-Thinker 双Agent系统 (全双工模式)")
+        print("Talker-Thinker 双 Agent 系统 (全双工模式)")
         print("=" * 60)
         print("输入 'quit' 或 'exit' 退出")
         print("输入 'stats' 查看统计信息")
-        print("提示: 处理过程中可随时输入新消息打断当前任务")
+        print("提示：处理过程中可随时输入新消息打断当前任务")
         print("=" * 60)
         print()
 
@@ -902,7 +973,7 @@ class TalkerThinkerApp:
             loop = asyncio.get_event_loop()
             while True:
                 try:
-                    # 使用线程池执行阻塞的input
+                    # 使用线程池执行阻塞的 input
                     line = await loop.run_in_executor(None, input)
                     await input_queue.put(line)
                 except EOFError:
@@ -921,7 +992,7 @@ class TalkerThinkerApp:
                         now = time.time()
                         timestamp = time.strftime("%H:%M:%S", time.localtime(now))
                         ms = int((now % 1) * 1000)
-                        print(f"\n[{timestamp}.{ms:03d}] 你: ", end="", flush=True)
+                        print(f"\n[{timestamp}.{ms:03d}] 你：", end="", flush=True)
 
                     # 等待用户输入
                     try:
@@ -988,7 +1059,7 @@ class TalkerThinkerApp:
                             # 有新输入，处理打断逻辑
                             if new_input.strip():
                                 # 显示用户输入
-                                print(f"\n\n[{time.strftime('%H:%M:%S')}.{int((time.time() % 1) * 1000):03d}] 你: {new_input}")
+                                print(f"\n\n[{time.strftime('%H:%M:%S')}.{int((time.time() % 1) * 1000):03d}] 你：{new_input}")
 
                                 handled, response = await self._handle_new_input_during_processing(
                                     new_input, session_id
@@ -1039,7 +1110,7 @@ class TalkerThinkerApp:
                         except asyncio.CancelledError:
                             pass
                         self.task_manager.end_task()
-                        
+
                         # 检查是否有队列中的任务需要处理
                         next_task = self.task_manager.task_queue.start_next()
                         if next_task:
@@ -1062,7 +1133,7 @@ class TalkerThinkerApp:
 
                 except Exception as e:
                     logger.error(f"Error in interactive mode: {e}")
-                    print(f"\n错误: {e}")
+                    print(f"\n错误：{e}")
                     self.task_manager.end_task()
 
         finally:
@@ -1079,11 +1150,82 @@ class TalkerThinkerApp:
             return self.orchestrator.get_stats()
         return {}
 
+    def _get_current_task_progress(self, session_id: str) -> Dict[str, Any]:
+        """获取当前任务进度信息"""
+        shared = self._get_shared_context(session_id)
+        if not shared:
+            return {"name": "当前任务", "percent": 0, "step": 0, "total": 0}
+
+        progress = shared.thinker_progress
+        percent = progress.get_progress_percent()
+
+        # 提取任务名称（从用户输入）
+        task_name = self.task_manager.current_input or "当前任务"
+        if len(task_name) > 20:
+            task_name = task_name[:20] + "..."
+
+        return {
+            "name": task_name,
+            "percent": percent,
+            "step": progress.current_step,
+            "total": progress.total_steps,
+            "stage": progress.current_stage,
+        }
+
+    def _generate_task_confirmation_request(
+        self,
+        new_input: str,
+        progress_info: Dict[str, Any],
+        elapsed: float
+    ) -> str:
+        """生成任务确认请求"""
+        task_name = progress_info.get("name", "当前任务")
+        percent = progress_info.get("percent", 0)
+        step = progress_info.get("step", 0)
+        total = progress_info.get("total", 0)
+
+        # 构建进度描述
+        if total > 0:
+            progress_desc = f"已执行 {step}/{total} 步 ({percent:.0f}%)"
+        else:
+            progress_desc = f"已执行 {elapsed:.0f}秒 ({percent:.0f}%)"
+
+        # 截断新任务输入
+        new_task = new_input[:30] + "..." if len(new_input) > 30 else new_input
+
+        return f"""
+[Talker] 检测到您想开始新任务「{new_task}」，当前任务「{task_name}」{progress_desc}。
+
+请选择如何处理：
+  1️⃣  取消当前任务，立即开始新任务（回复"1"或"取消"）
+  2️⃣  新任务加入队列，当前任务继续（回复"2"或"排队"）
+  3️⃣  完成后处理新任务（回复"3"或"稍后"）
+"""
+
+    def _is_confirmation_reply(self, text: str) -> bool:
+        """检测是否是确认回复"""
+        if not getattr(self, '_awaiting_confirmation', False):
+            return False
+        text = text.lower().strip()
+        # 检测确认选项关键词
+        return any(k in text for k in ["1", "取消", "2", "排队", "3", "稍后"])
+
+    def _parse_confirmation_choice(self, text: str) -> Optional[str]:
+        """解析确认选择"""
+        text = text.lower().strip()
+        if "1" in text or "取消" in text:
+            return "cancel"
+        elif "2" in text or "排队" in text:
+            return "queue"
+        elif "3" in text or "稍后" in text:
+            return "after"
+        return None
+
 
 async def main_async():
     """异步主函数"""
     parser = argparse.ArgumentParser(
-        description="Talker-Thinker 双Agent系统"
+        description="Talker-Thinker 双 Agent 系统"
     )
     parser.add_argument(
         "-i", "--interactive",
@@ -1098,7 +1240,7 @@ async def main_async():
     parser.add_argument(
         "-s", "--session",
         type=str,
-        help="会话ID",
+        help="会话 ID",
     )
     parser.add_argument(
         "--stats",
@@ -1115,7 +1257,7 @@ async def main_async():
 
     elif args.query:
         await app.initialize()
-        print("\n助手: ", end="")
+        print("\n助手：", end="")
         await app.process(args.query, args.session)
         print()
 
@@ -1139,78 +1281,3 @@ def main():
 
 if __name__ == "__main__":
     main()
-
-    def _get_current_task_progress(self, session_id: str) -> Dict[str, Any]:
-        """获取当前任务进度信息"""
-        shared = self._get_shared_context(session_id)
-        if not shared:
-            return {"name": "当前任务", "percent": 0, "step": 0, "total": 0}
-        
-        progress = shared.thinker_progress
-        percent = progress.get_progress_percent()
-        
-        # 提取任务名称（从用户输入）
-        task_name = self.task_manager.current_input or "当前任务"
-        if len(task_name) > 20:
-            task_name = task_name[:20] + "..."
-        
-        return {
-            "name": task_name,
-            "percent": percent,
-            "step": progress.current_step,
-            "total": progress.total_steps,
-            "stage": progress.current_stage,
-        }
-
-    def _generate_task_confirmation_request(
-        self,
-        new_input: str,
-        progress_info: Dict[str, Any],
-        elapsed: float
-    ) -> str:
-        """生成任务确认请求"""
-        task_name = progress_info.get("name", "当前任务")
-        percent = progress_info.get("percent", 0)
-        step = progress_info.get("step", 0)
-        total = progress_info.get("total", 0)
-        
-        # 构建进度描述
-        if total > 0:
-            progress_desc = f"已执行 {step}/{total} 步 ({percent:.0f}%)"
-        else:
-            progress_desc = f"已执行 {elapsed:.0f}秒 ({percent:.0f}%)"
-        
-        # 截断新任务输入
-        new_task = new_input[:30] + "..." if len(new_input) > 30 else new_input
-        
-        return f"""
-[Talker] 检测到您想开始新任务「{new_task}」，当前任务「{task_name}」{progress_desc}。
-
-请选择如何处理：
-  1️⃣  取消当前任务，立即开始新任务（回复"1"或"取消"）
-  2️⃣  新任务加入队列，当前任务继续（回复"2"或"排队"）
-  3️⃣  完成后处理新任务（回复"3"或"稍后"）
-"""
-
-    # === 确认机制相关属性 ===
-    _pending_new_task: Optional[str] = None  # 待确认的新任务
-    _awaiting_confirmation: bool = False     # 是否等待确认
-
-    def _is_confirmation_reply(self, text: str) -> bool:
-        """检测是否是确认回复"""
-        if not self._awaiting_confirmation:
-            return False
-        text = text.lower().strip()
-        # 检测确认选项关键词
-        return any(k in text for k in ["1", "取消", "2", "排队", "3", "稍后"])
-
-    def _parse_confirmation_choice(self, text: str) -> Optional[str]:
-        """解析确认选择"""
-        text = text.lower().strip()
-        if "1" in text or "取消" in text:
-            return "cancel"
-        elif "2" in text or "排队" in text:
-            return "queue"
-        elif "3" in text or "稍后" in text:
-            return "after"
-        return None
