@@ -215,9 +215,22 @@ if precheck_timeout_broadcast and "Thinker 已启动" in talker_rewrite:
 ## 成功标准
 
 - [x] **无 Thinker 前缀**：对话中不出现"Thinker:"字样
+- [x] **无 Thinker 暴露**：所有用户可见的输出中不使用"Thinker"一词（改用"深度思考模块"）
 - [x] **无重复播报**：Talker 播报与 Thinker 劫持输出不重复
 - [x] **前后连贯**：播报内容连贯、自然
 - [x] **所有模式覆盖**：所有 Thinker 输出模式都被劫持或转换
+
+## 额外优化
+
+除了原计划的修复，还进行了以下优化：
+
+1. **移除所有用户-facing 的"Thinker"标识**：
+   - "已转交给 Thinker 处理" → "已转交给深度思考模块处理"
+   - "Thinker 已完成规划" → "深度思考模块已完成规划"
+   - "Thinker 已接手" → "深度思考模块已接手"
+   - "Thinker 处理完成" → "深度处理完成"
+
+2. **统一输出风格**：所有 Thinker 输出都通过 Talker 重新组织后显示
 
 ---
 

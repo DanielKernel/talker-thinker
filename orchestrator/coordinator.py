@@ -255,7 +255,7 @@ class Orchestrator:
         if stage == ThinkerStage.IDLE:
             if style == "initial":
                 templates = [
-                    "Thinker已接手，正在加载上下文",
+                    "深度思考模块已接手，正在加载上下文",
                     "正在准备分析环境",
                     "正在同步任务信息",
                 ]
@@ -370,9 +370,9 @@ class Orchestrator:
 
         # === 检测 Thinker 阶段标记 ===
 
-        # "开始处理..." → Thinker 已启动（支持多种变体）
+        # "开始处理..." → 已启动（支持多种变体）
         if chunk_stripped.startswith("开始处理") or re.search(r'开始\s*处理', chunk_stripped) or '开始处理' in normalized:
-            return "Thinker 已启动，正在分析您的问题..."
+            return "已启动，正在分析您的问题..."
 
         # "开始 xxx..." 通用模式
         if chunk_stripped.startswith("开始") and "..." in chunk_stripped:
@@ -491,7 +491,7 @@ class Orchestrator:
         # 空白字符容错检测：对于短内容，使用 normalized 再次检测
         if len(normalized) < 20:
             if '开始处理' in normalized:
-                return "Thinker 已启动，正在分析您的问题..."
+                return "已启动，正在分析您的问题..."
             if '正在分析' in normalized:
                 return "正在分析问题，请稍候..."
             if '整合答案' in normalized:
@@ -1085,7 +1085,7 @@ class Orchestrator:
         # Talker首先给用户反馈
         if settings.SHOW_AGENT_IDENTITY:
             timestamp = format_timestamp(thinker_start)
-            yield f"\n[{timestamp}] Talker: 好的，这个问题需要深度思考，已转交给Thinker处理"
+            yield f"\n[{timestamp}] Talker: 好的，这个问题需要深度思考，已转交给深度思考模块处理"
 
         # === 澄清机制：检测是否需要澄清（带主动播报） ===
         async def run_precheck():
@@ -1159,7 +1159,7 @@ class Orchestrator:
                 quick_plan, needs_clarification, reason, missing_info, question = await precheck_task
                 if not needs_clarification and quick_plan and getattr(quick_plan, "steps", None):
                     ts = format_timestamp(time.time())
-                    yield f"\n[{ts}] Talker: Thinker已完成规划，预计{len(quick_plan.steps)}步执行"
+                    yield f"\n[{ts}] Talker: 深度思考模块已完成规划，预计{len(quick_plan.steps)}步执行"
                 if needs_clarification and missing_info and shared and question:
                     ts = format_timestamp(time.time())
                     yield f"\n[{ts}] Talker: {question}"
@@ -1394,7 +1394,8 @@ class Orchestrator:
                     ts = format_timestamp(time.time())
                     yield f"\n[{ts}] Talker: "
                     thinker_first_token_shown = True
-            yield chunk
+                # 所有输出都通过 Talker 播报，不直接暴露 Thinker 内容
+                yield chunk
 
         # 记录Handoff回Talker
         self._record_handoff(
