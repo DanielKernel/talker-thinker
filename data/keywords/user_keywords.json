@@ -1,6 +1,6 @@
 {
   "version": "1.0.0",
-  "updated_at": "2026-02-21T21:41:57.621203",
+  "updated_at": "2026-02-21T21:54:05.302322",
   "description": "用户自定义关键词库",
   "custom_intents": {
     "cancel": {

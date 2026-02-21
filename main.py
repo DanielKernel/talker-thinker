@@ -898,8 +898,13 @@ class TalkerThinkerApp:
                     line = await loop.run_in_executor(None, input_handler.get_input, session_id)
                     await input_queue.put(line)
                 except EOFError:
+                    logger.info("Input EOF, exiting read_input loop")
                     break
-                except Exception:
+                except KeyboardInterrupt:
+                    logger.info("Input interrupted by user")
+                    break
+                except Exception as e:
+                    logger.error(f"Error reading input: {e}", exc_info=True)
                     break
 
         # 启动输入读取任务
@@ -1034,9 +1039,11 @@ class TalkerThinkerApp:
                         if next_task:
                             print(f"\n[Talker] 开始处理队列任务：{next_task.name}...")
                             # 异步启动新任务（不等待完成）
-                            asyncio.create_task(self._process_as_task(
+                            task = asyncio.create_task(self._process_as_task(
                                 next_task.user_input, session_id, time.time()
                             ))
+                            # Add error handling for the background task
+                            task.add_done_callback(lambda t: self._handle_background_task_error(t))
                         print()
 
                 except KeyboardInterrupt:
@@ -1061,6 +1068,20 @@ class TalkerThinkerApp:
                 await input_task
             except asyncio.CancelledError:
                 pass
+
+    def _handle_background_task_error(self, task: asyncio.Task) -> None:
+        """
+        Handle errors from background tasks
+
+        Args:
+            task: The completed task
+        """
+        try:
+            task.result()  # This will raise any exception that occurred
+        except asyncio.CancelledError:
+            pass  # Task was cancelled, this is expected
+        except Exception as e:
+            logger.error(f"Background task error: {e}", exc_info=True)
 
     def get_stats(self) -> dict:
         """获取系统统计"""

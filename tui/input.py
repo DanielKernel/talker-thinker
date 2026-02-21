@@ -8,6 +8,10 @@ Provides Chinese-friendly input with:
 - File-based history persistence
 """
 
+import os
+import asyncio
+from pathlib import Path
+
 from prompt_toolkit import prompt
 from prompt_toolkit.history import FileHistory
 from prompt_toolkit.auto_suggest import AutoSuggestFromHistory
@@ -37,6 +41,12 @@ def create_key_bindings():
     return kb
 
 
+def get_logger():
+    """Lazy logger import to avoid circular dependency"""
+    from monitoring.logging import get_logger as _get_logger
+    return _get_logger("tui.input")
+
+
 class TalkerInput:
     """
     Chinese-friendly input handler using prompt_toolkit
@@ -55,9 +65,15 @@ class TalkerInput:
         Args:
             history_file: Path to store command history
         """
-        self.history_file = history_file
+        # Expand ~ to actual home directory path
+        self.history_file = os.path.expanduser(history_file)
         self._key_bindings = create_key_bindings()
-        self._history = FileHistory(history_file)
+
+        # Ensure parent directory exists
+        history_path = Path(self.history_file)
+        history_path.parent.mkdir(parents=True, exist_ok=True)
+
+        self._history = FileHistory(self.history_file)
 
     def get_input(self, session_id: str = None) -> str:
         """
@@ -71,6 +87,7 @@ class TalkerInput:
         """
         import time
 
+        logger = get_logger()
         now = time.time()
         timestamp = time.strftime("%H:%M:%S", time.localtime(now))
         ms = int((now % 1) * 1000)
@@ -94,9 +111,14 @@ class TalkerInput:
 
         except EOFError:
             # Handle Ctrl+D
+            logger.debug("Input EOFError")
             return ""
         except KeyboardInterrupt:
             # Handle Ctrl+C
+            logger.debug("Input KeyboardInterrupt")
+            return ""
+        except Exception as e:
+            logger.error(f"Input error: {e}", exc_info=True)
             return ""
 
     def print_status(self, message: str):
@@ -145,10 +167,6 @@ class FallbackInput:
         print(response, end="", flush=True)
 
 
-# Import asyncio for fallback
-import asyncio
-
-
 def get_input_handler(use_prompt_toolkit: bool = True) -> TalkerInput | FallbackInput:
     """
     Factory function to get appropriate input handler
@@ -159,9 +177,12 @@ def get_input_handler(use_prompt_toolkit: bool = True) -> TalkerInput | Fallback
     Returns:
         Appropriate input handler instance
     """
+    logger = get_logger()
     if use_prompt_toolkit:
         try:
             return TalkerInput()
-        except ImportError:
-            pass
+        except ImportError as e:
+            logger.warning(f"Failed to import prompt_toolkit: {e}, using fallback")
+        except Exception as e:
+            logger.error(f"Failed to create TalkerInput: {e}, using fallback", exc_info=True)
     return FallbackInput()
