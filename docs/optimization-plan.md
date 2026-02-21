@@ -900,6 +900,59 @@ python main.py -i
 
 ## 9. 更新日志
 
+### 2026-02-21（第五次更新）- Talker 播报内容优化
+**问题发现**：Thinker 输出详细进度信息（如"[步骤 1] 搜索平台基础信息..."、"[规划] 共 4 个步骤"），但 Talker 播报仍然是机械的"仍在执行阶段（83s）"，信息浪费严重。
+
+**问题现象**：
+```
+[16:31:18.486] Talker: 仍在分析阶段（67s）  ✓ 完成 (52283ms)
+[规划] 任务目标：用户想要比较高德地图和滴滴出行的价格，并找到便宜的出行选项
+[规划] 共 4 个步骤
+[步骤 1] 搜索平台基础信息...
+[16:31:34.573] Talker: 仍在执行阶段（83s）  ← 没有利用 Thinker 的真实进度信息
+```
+
+**优化建议**：
+1. **Thinker 输出劫持**：Thinker 的阶段输出（如"[步骤 1] xxx"）不直接显示给用户，先传递给 Talker
+2. **Talker 重新组织播报**：Talker 基于 Thinker 的真实输出生成更有信息量的播报
+   - 原播报："仍在执行阶段（83s）"
+   - 优化后："Thinker 正在执行步骤 1/4：搜索平台基础信息，已完成 25%"
+3. **进度百分比可视化**：基于 Thinker 的步骤进度动态计算百分比
+4. **播报内容多样化**：根据 Thinker 的实际输出内容生成有意义的播报，而不是固定模板
+
+**实现方案**：
+```python
+# orchestrator/coordinator.py - _collaboration_handoff()
+async def _collaboration_handoff(self, user_input, context, ...):
+    # ...
+
+    # 主循环：处理 Thinker 输出和播报
+    while not thinker_complete:
+        current_time = time.time()
+        elapsed = current_time - thinker_start
+
+        # === 播报检查 ===
+        if current_time - last_broadcast_time >= broadcast_interval:
+            # 优先使用 SharedContext 中的实时进度
+            if shared and shared.thinker_progress.current_stage != "idle":
+                stage_name = shared.thinker_progress.current_stage
+                current_step = shared.thinker_progress.current_step
+                total_steps = shared.thinker_progress.total_steps
+                latest_result = shared.thinker_progress.partial_results[-1] if shared.thinker_progress.partial_results else ""
+
+                # 基于真实进度生成播报
+                if stage_name == "executing" and total_steps > 0:
+                    progress_pct = int((current_step / total_steps) * 100)
+                    broadcast_msg = f"Thinker 正在执行步骤{current_step}/{total_steps}: {latest_result}，已完成{progress_pct}%"
+                else:
+                    broadcast_msg = self._generate_stage_broadcast(...)
+```
+
+**涉及文件**：
+- `orchestrator/coordinator.py` - `_collaboration_handoff()` 播报逻辑
+- `context/shared_context.py` - `ThinkerProgress.partial_results` 字段
+- `agents/thinker/agent.py` - 各阶段更新 `shared.thinker_progress`
+
 ### 2026-02-20（第四次更新）
 - **播报去重大幅改进**（重要）：
   - 新增`used_messages`按阶段追踪已使用消息

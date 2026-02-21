@@ -1034,6 +1034,7 @@ class Orchestrator:
                 if should_broadcast:
                     # 生成播报消息和模板
                     if reason == "heartbeat":
+                        # 基于真实进度生成播报，而不是机械的"仍在 xx 阶段"
                         stage_zh = {
                             ThinkerStage.ANALYZING: "分析",
                             ThinkerStage.PLANNING: "规划",
@@ -1042,9 +1043,31 @@ class Orchestrator:
                             ThinkerStage.IDLE: "准备",
                             ThinkerStage.COMPLETED: "收尾",
                         }.get(new_stage, "处理")
-                        bucket = int(elapsed // 15)
-                        broadcast_msg = f"仍在{stage_zh}阶段（{elapsed:.0f}s）"
-                        msg_template = f"heartbeat_{new_stage.value}_{bucket}"
+
+                        # 优先显示详细进度信息
+                        if total_steps > 0 and current_step > 0:
+                            progress_pct = int((current_step / total_steps) * 100)
+                            if step_desc:
+                                # 有步骤描述：显示具体步骤信息
+                                broadcast_msg = f"步骤{current_step}/{total_steps}: {step_desc}（{progress_pct}%）"
+                                msg_template = f"step_{current_step}_{total_steps}"
+                            else:
+                                # 无步骤描述：显示进度百分比
+                                broadcast_msg = f"执行中：{current_step}/{total_steps} 步（{progress_pct}%）"
+                                msg_template = f"progress_{current_step}_{total_steps}"
+                        elif shared and shared.thinker_progress.partial_results:
+                            # 有中间结果：显示最新结果
+                            latest = shared.thinker_progress.partial_results[-1]
+                            if latest and len(latest) < 50:
+                                broadcast_msg = f"{stage_zh}中：{latest}"
+                                msg_template = f"result_{hash(latest) % 1000}"
+                            else:
+                                broadcast_msg = f"仍在{stage_zh}阶段（{elapsed:.0f}s）"
+                                msg_template = f"heartbeat_{new_stage.value}_{int(elapsed // 15)}"
+                        else:
+                            # 降级：显示时间和阶段
+                            broadcast_msg = f"仍在{stage_zh}阶段（{elapsed:.0f}s）"
+                            msg_template = f"heartbeat_{new_stage.value}_{int(elapsed // 15)}"
                     else:
                         broadcast_msg, msg_template = self._generate_stage_broadcast(
                             stage=new_stage,
