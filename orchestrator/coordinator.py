@@ -314,14 +314,22 @@ class Orchestrator:
         elif stage == ThinkerStage.EXECUTING:
             if total_steps > 0 and current_step > 0:
                 progress_pct = int((current_step / total_steps) * 100)
-                if step_desc:
-                    short_desc = step_desc[:15] + "..." if len(step_desc) > 15 else step_desc
-                    msg = f"第{current_step}/{total_steps}步: {short_desc} ({progress_pct}%)"
-                    template = f"第{current_step}/{total_steps}步"
-                    return msg, template
-                msg = f"执行中: {current_step}/{total_steps} 步 ({progress_pct}%)"
-                template = f"第{current_step}/{total_steps}步"
+                # 清理步骤描述中的冗余内容
+                clean_step_desc = step_desc.strip()
+                # 移除步骤描述中的"正在"、"搜索"等冗余前缀
+                for prefix in ["正在", "开始", "进行", "搜索", "获取", "分析"]:
+                    if clean_step_desc.startswith(prefix):
+                        clean_step_desc = clean_step_desc[len(prefix):].strip()
+                        break
+                # 限制描述长度
+                if len(clean_step_desc) > 20:
+                    clean_step_desc = clean_step_desc[:17] + "..."
+                # 生成进度条
+                progress_bar = self._format_progress_bar(current_step, total_steps)
+                msg = f"步骤{current_step}/{total_steps}: {clean_step_desc} {progress_bar}"
+                template = f"step_{current_step}_{total_steps}"
                 return msg, template
+            # 没有具体步骤信息时的降级播报
             templates = [
                 "正在处理核心任务",
                 "执行关键步骤",
@@ -360,10 +368,33 @@ class Orchestrator:
         检测 Thinker 输出的阶段标记（如"[步骤 1] xxx"、"[思考] xxx"、"[规划] xxx"），
         由 Talker 重新组织语言后显示，使用户感知更一致、更友好。
 
+        关键改进：
+        1. 过滤无意义的中间标记（如"✓ 完成 (Xms)"）
+        2. 去重处理，避免重复内容播报
+        3. 根据阶段和进度生成更合适的播报
+
         Returns:
             Optional[str]: 如果检测到阶段标记则返回重写后的播报，否则返回 None
         """
         chunk_stripped = chunk.strip()
+
+        # === 过滤无意义的中间标记（静默处理）===
+
+        # ✓ 完成 (Xms) - 步骤完成标记，静默处理
+        if re.match(r'✓\s*完成\s*\((\d+)ms\)', chunk_stripped):
+            return None
+
+        # ✓ 已验证 xxx - 验证标记，静默处理
+        if re.match(r'✓\s*已验证', chunk_stripped):
+            return None
+
+        # --- 分隔线类输出，静默处理
+        if chunk_stripped.startswith('---') or chunk_stripped.startswith('==='):
+            return None
+
+        # 进度报告类（Thinker 内部日志），静默处理
+        if '执行进度' in chunk_stripped and ':' in chunk_stripped:
+            return None
 
         # 空白字符容错：移除所有空白字符后再匹配
         normalized = re.sub(r'\s+', '', chunk_stripped)
@@ -415,9 +446,9 @@ class Orchestrator:
         step_match = re.match(r'[\[［] 步骤\s*(\d+)[\]］]\s*([^\.\.]+)\.\.\.', chunk_stripped)
         if step_match and total_steps > 0:
             step_num = int(step_match.group(1))
-            step_name = step_match.group(2)
+            step_name = step_match.group(2).strip()
             progress_pct = int((step_num / total_steps) * 100)
-            return f"执行步骤{step_num}/{total_steps}: {step_name}（{progress_pct}%）"
+            return f"步骤{step_num}/{total_steps}: {step_name}（{progress_pct}%）"
 
         # [步骤 X] 没有省略号的变体
         step_no_dots = re.match(r'[\[［] 步骤\s*(\d+)[\]］]\s*(.+)', chunk_stripped)
@@ -425,7 +456,7 @@ class Orchestrator:
             step_num = int(step_no_dots.group(1))
             step_name = step_no_dots.group(2).strip()
             progress_pct = int((step_num / total_steps) * 100)
-            return f"执行步骤{step_num}/{total_steps}: {step_name}（{progress_pct}%）"
+            return f"步骤{step_num}/{total_steps}: {step_name}（{progress_pct}%）"
 
         # [思考] 正在 xxx...（支持中文括号）
         thinking_match = re.match(r'[\[［] 思考[\]］]\s*(.+)\.\.\.', chunk_stripped)
@@ -467,12 +498,6 @@ class Orchestrator:
         if chunk_stripped.startswith("[分析]") or chunk_stripped.startswith("［分析］"):
             return "正在分析问题，请稍候..."
 
-        # ✓ 完成 (Xms) - 静默处理
-        check_done_match = re.match(r'✓\s*完成\s*\((\d+)ms\)', chunk_stripped)
-        if check_done_match:
-            # 步骤完成标记，静默处理
-            return None
-
         # [答案] xxx - 最终答案，静默处理，由后续逻辑处理
         answer_match = re.match(r'[\[［] 答案[\]］]\s*(.+)', chunk_stripped)
         if answer_match:
@@ -486,7 +511,7 @@ class Orchestrator:
             stage_type = stage_marker_match.group(1)
             content = stage_marker_match.group(2)
             # 通用的阶段标记处理
-            return f"正在处理中，请稍候..."
+            return "正在处理中，请稍候..."
 
         # 空白字符容错检测：对于短内容，使用 normalized 再次检测
         if len(normalized) < 20:
