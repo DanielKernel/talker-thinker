@@ -214,3 +214,61 @@ class SharedContext:
             "is_paused": self.is_paused,
             "is_cancelled": self.is_cancelled,
         }
+
+
+@dataclass
+class TaskInfo:
+    """任务信息"""
+    task_id: str = ""                           # 任务 ID
+    name: str = ""                              # 任务名称
+    user_input: str = ""                        # 用户输入
+    created_at: float = field(default_factory=time.time)
+    started_at: Optional[float] = None          # 开始执行时间
+    progress_percent: float = 0.0               # 进度百分比
+    status: str = "pending"                     # pending/running/paused/completed/cancelled
+
+
+@dataclass
+class TaskQueue:
+    """任务队列"""
+    running: Optional[TaskInfo] = None          # 当前运行任务
+    pending: List[TaskInfo] = field(default_factory=list)  # 待处理任务
+    paused: List[TaskInfo] = field(default_factory=list)   # 已暂停任务
+    completed: List[TaskInfo] = field(default_factory=list)  # 已完成任务
+
+    def add_pending(self, task: TaskInfo):
+        """添加待处理任务"""
+        self.pending.append(task)
+
+    def start_next(self) -> Optional[TaskInfo]:
+        """启动下一个待处理任务"""
+        if self.pending and not self.running:
+            self.running = self.pending.pop(0)
+            self.running.started_at = time.time()
+            self.running.status = "running"
+            return self.running
+        return None
+
+    def cancel_running(self):
+        """取消当前任务"""
+        if self.running:
+            self.running.status = "cancelled"
+            self.running = None
+
+    def pause_running(self):
+        """暂停当前任务"""
+        if self.running:
+            self.running.status = "paused"
+            self.paused.append(self.running)
+            self.running = None
+
+    def get_status_summary(self) -> str:
+        """获取状态摘要"""
+        parts = []
+        if self.running:
+            parts.append(f"运行中：{self.running.name}")
+        if self.pending:
+            parts.append(f"等待中：{len(self.pending)}个任务")
+        if self.paused:
+            parts.append(f"已暂停：{len(self.paused)}个任务")
+        return " | ".join(parts) if parts else "空闲"

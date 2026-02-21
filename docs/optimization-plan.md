@@ -1072,3 +1072,206 @@ async def _collaboration_handoff(self, user_input, context, ...):
 [16:31:34] Talker: 执行步骤 1/4: 搜索平台基础信息 [█████░░░░░░░░░░░░░] 25%
 [16:31:50] Talker: 步骤 2/4: 搜索价格对比信息 [██████████░░░░░░░░] 50%，还需一点时间...
 ```
+
+---
+
+## 2026-02-21（第七次更新）- 任务打断确认机制优化
+
+### 问题描述
+**原始行为**：任务执行过程中，用户发送新消息时，系统直接取消正在执行的任务。
+
+**问题场景**：
+```
+[16:30:00] Talker: 好的，已转交 Thinker 处理...
+[16:30:10] Talker: 执行步骤 1/4: 搜索平台基础信息 [█████░░░░░░░░░░░░░] 25%
+[16:30:15] 用户：对了，我的口味是喜欢吃辣
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+⚠️ 上一任务已被用户打断  ← 错误！用户只是补充信息
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+[Talker] 好的，已取消当前任务。
+```
+
+**根本原因**：
+1. 默认行为是直接取消任务（REPLACE）
+2. 缺乏意图确认机制
+3. 不支持多任务并发处理
+
+### 优化方案
+
+#### 1. 意图理解优先
+用户新消息到达时，先进行意图分类：
+- **COMMENT/BACKCHANNEL**：评论/附和 → 不打断，简单回应
+- **QUERY_STATUS**：查询进度 → 不打断，返回状态
+- **MODIFY**：补充/修改信息 → 不打断，并入当前任务
+- **REPLACE**：新任务/取消 → 进入确认流程
+
+#### 2. 确认机制（重要变更）
+**REPLACE 意图确认**：
+```
+[16:30:15] 用户：帮我定个餐厅
+[Talker] 检测到您想开始新任务「定餐厅」，当前任务「对比高德和滴滴」已执行 25%。
+         请问是否要：
+         1. 取消当前任务，开始新任务
+         2. 将新任务加入队列，当前任务继续
+         3. 先完成当前任务，再处理新任务
+```
+
+#### 3. 多任务并发支持
+**任务队列设计**：
+```python
+class TaskQueue:
+    pending: List[Task]      # 待处理任务
+    running: Optional[Task]  # 当前运行任务
+    paused: List[Task]       # 已暂停任务
+```
+
+**用户可选择**：
+- **模式 A（串行）**：完成任务队列后再处理新任务
+- **模式 B（并行）**：同时处理多个任务（Talker 分时播报）
+
+### 实施步骤
+
+#### 步骤 1：意图分类确认
+```python
+# main.py - _handle_new_input_during_processing()
+if intent == UserIntent.REPLACE:
+    # 不直接取消，先确认
+    confirmation_needed = self._needs_confirmation(new_input)
+    if confirmation_needed:
+        return True, self._generate_confirmation_request(new_input, current_task_info)
+```
+
+#### 步骤 2：确认请求生成
+```python
+def _generate_confirmation_request(self, new_input: str, current_task: TaskInfo) -> str:
+    """生成确认请求"""
+    progress = current_task.get_progress()
+    return f"""检测到您想开始新任务「{new_input[:20]}」，当前任务「{current_task.name}」已执行{progress}%。
+请问是否要：
+1. 取消当前任务，开始新任务（回复"1"或"取消"）
+2. 将新任务加入队列，当前任务继续（回复"2"或"排队"）
+3. 先完成当前任务，再处理新任务（回复"3"或"稍后"）"""
+```
+
+#### 步骤 3：多任务队列实现
+```python
+# orchestrator/coordinator.py
+class TaskManager:
+    def __init__(self):
+        self.task_queue = TaskQueue()
+        self.multi_task_mode = False  # 多任务模式开关
+
+    async def handle_new_task(self, new_input: str, strategy: str):
+        """处理新任务请求"""
+        if strategy == "cancel":
+            await self.cancel_current_task()
+            await self.start_new_task(new_input)
+        elif strategy == "queue":
+            self.task_queue.pending.append(Task(new_input))
+            return "新任务已加入队列，当前任务继续处理"
+        elif strategy == "after":
+            self.task_queue.pending.insert(0, Task(new_input))
+            return "新任务将在当前任务完成后立即处理"
+```
+
+#### 步骤 4：Talker 分时播报（多任务模式）
+```python
+async def broadcast_multi_task_progress(self, tasks: List[Task]):
+    """多任务模式下的分时播报"""
+    for task in tasks:
+        if task.is_running:
+            progress = task.get_progress()
+            yield f"[{task.name}] 步骤{task.current_step}/{task.total_steps}: {task.step_desc} {progress}%"
+```
+
+### 涉及文件
+- `main.py`:
+  - `TaskManager.classify_intent()` - 意图分类
+  - `TalkerThinkerApp._handle_new_input_during_processing()` - 确认逻辑
+  - 新增 `_needs_confirmation()` - 判断是否需要确认
+  - 新增 `_generate_confirmation_request()` - 生成确认请求
+- `orchestrator/coordinator.py`:
+  - 新增 `TaskQueue` 类 - 任务队列管理
+  - `TaskManager` - 多任务支持
+- `context/shared_context.py`:
+  - 新增 `task_queue` 字段
+
+### 预期效果
+```
+场景 1：用户补充信息（不打断）
+[16:30:10] Talker: 执行步骤 1/4: 搜索平台基础信息 [█████░░░░░░░░░░░░░] 25%
+[16:30:15] 用户：对了，我的口味是喜欢吃辣
+[16:30:16] Talker: 收到，已记录您的口味偏好「喜欢吃辣」，将继续处理当前任务...
+
+场景 2：用户新任务请求（需要确认）
+[16:30:10] Talker: 执行步骤 1/4: 搜索平台基础信息 [█████░░░░░░░░░░░░░] 25%
+[16:30:15] 用户：帮我定个餐厅
+[16:30:16] Talker: 检测到您想开始新任务「定餐厅」，当前任务「对比高德和滴滴」已执行 25%。
+                  请问是否要：
+                  1. 取消当前任务，开始新任务
+                  2. 将新任务加入队列，当前任务继续
+                  3. 先完成当前任务，再处理新任务
+
+场景 3：多任务并发处理
+[16:30:10] Talker: [任务 1] 步骤 2/4: 搜索价格对比信息 [██████████░░░░░░░░] 50%
+[16:30:20] Talker: [任务 2] 步骤 1/3: 搜索餐厅信息 [█████░░░░░░░░░░░░░] 33%
+[16:30:30] Talker: [任务 1] 步骤 3/4: 分析用户需求 [███████████████░░░] 75%
+```
+
+### 测试用例
+- `test_comment_should_not_interrupt` - 评论不打断
+- `test_supplement_should_not_interrupt` - 补充信息不打断
+- `test_new_task_requires_confirmation` - 新任务需要确认
+- `test_task_queue_management` - 任务队列管理
+- `test_multi_task_broadcast` - 多任务分时播报
+
+### 2026-02-21（第八次更新）- 任务打断确认机制
+
+**问题描述**：任务执行过程中，用户发送新消息时，系统直接取消正在执行的任务，没有进行意图理解和确认。
+
+**优化方案**：
+1. **意图理解优先**：用户新消息到达时，先进行意图分类，只有 REPLACE 意图才需要确认
+2. **确认机制**：REPLACE 意图不直接取消任务，而是生成确认请求让用户选择
+3. **多任务队列支持**：用户可选择取消/排队/稍后处理
+
+**确认请求示例**：
+```
+[Talker] 检测到您想开始新任务「定餐厅」，当前任务「对比高德和滴滴」已执行 2/4 步 (50%)。
+
+请选择如何处理：
+  1️⃣  取消当前任务，立即开始新任务（回复"1"或"取消"）
+  2️⃣  新任务加入队列，当前任务继续（回复"2"或"排队"）
+  3️⃣  完成后处理新任务（回复"3"或"稍后"）
+```
+
+**涉及文件**：
+- `main.py`:
+  - 新增 `_get_current_task_progress()` - 获取任务进度
+  - 新增 `_generate_task_confirmation_request()` - 生成确认请求
+  - 新增 `_is_confirmation_reply()` - 检测确认回复
+  - 新增 `_parse_confirmation_choice()` - 解析确认选择
+  - 修改 `_handle_new_input_during_processing()` - 处理确认逻辑
+  - 新增 `_pending_new_task` / `_awaiting_confirmation` 属性
+- `context/shared_context.py`:
+  - 新增 `TaskInfo` 类 - 任务信息
+  - 新增 `TaskQueue` 类 - 任务队列管理
+
+**预期效果**：
+```
+场景 1：任务刚开始（<10 秒且进度<20%）
+[16:30:05] 用户：帮我定个餐厅
+[16:30:06] Talker: ⚠️ 上一任务已被用户打断
+[Talker] 好的，已取消当前任务，开始处理新任务...
+
+场景 2：任务执行中（需要确认）
+[16:30:30] 用户：帮我定个餐厅
+[16:30:31] Talker: 检测到您想开始新任务「定餐厅」，当前任务「对比高德和滴滴」已执行 2/4 步 (50%)。
+                  请选择如何处理：
+                  1️⃣  取消当前任务，立即开始新任务
+                  2️⃣  新任务加入队列，当前任务继续
+                  3️⃣  完成后处理新任务
+
+场景 3：用户选择排队
+[16:30:35] 用户：2
+[16:30:36] Talker: 新任务已加入队列，当前任务继续处理...
+```

@@ -724,15 +724,42 @@ class TalkerThinkerApp:
             return True, self._build_status_reply(session_id, current, elapsed)
 
         elif intent == UserIntent.REPLACE:
-            print("\n" + "━" * 50)
-            print("⚠️ 上一任务已被用户打断")
-            print("━" * 50)
-            await self.task_manager.cancel_current_task()
-            if interrupt_action == InterruptAction.CANCEL_ONLY:
-                self.task_manager.set_pending_replacement_input(None)
-                return True, "\n[Talker] 好的，已取消当前任务。"
-            self.task_manager.set_pending_replacement_input(replacement_input or new_input.strip())
-            return False, None  # 返回False表示需要处理新任务
+            # 新任务请求：先确认，不直接取消
+            elapsed = time.time() - self.task_manager.task_start_time
+            progress_info = self._get_current_task_progress(session_id)
+            
+            # 保存待处理的新任务
+            self._pending_new_task = replacement_input or new_input.strip()
+            
+            # 判断是否需要确认（短任务或执行时间<10 秒可直接取消）
+            if elapsed < 10 and progress_info.get("percent", 0) < 20:
+                # 任务刚开始，直接取消
+                await self.task_manager.cancel_current_task()
+                self._pending_new_task = None
+                self._awaiting_confirmation = False
+                return False, None
+            else:
+                # 需要确认
+                self._awaiting_confirmation = True
+                return True, self._generate_task_confirmation_request(new_input, progress_info, elapsed)
+
+        # 处理确认回复
+        if self._is_confirmation_reply(new_input):
+            self._awaiting_confirmation = False
+            choice = self._parse_confirmation_choice(new_input)
+            if choice == "cancel":
+                await self.task_manager.cancel_current_task()
+                pending_task = self._pending_new_task
+                self._pending_new_task = None
+                return False, "\n[Talker] 好的，已取消当前任务，开始处理新任务..."
+            elif choice == "queue":
+                # 加入队列逻辑（待实现多任务队列）
+                self._pending_new_task = None
+                return True, "\n[Talker] 新任务已加入队列，当前任务继续处理..."
+            elif choice == "after":
+                # 完成后处理逻辑
+                self._awaiting_confirmation = False
+                return True, "\n[Talker] 好的，新任务将在当前任务完成后立即处理"
 
         elif intent == UserIntent.MODIFY:
             # 补充信息，确认收到
@@ -1059,3 +1086,78 @@ def detect_user_emotion(text: str) -> str:
 
     # 默认中性
     return "neutral"
+
+    def _get_current_task_progress(self, session_id: str) -> Dict[str, Any]:
+        """获取当前任务进度信息"""
+        shared = self._get_shared_context(session_id)
+        if not shared:
+            return {"name": "当前任务", "percent": 0, "step": 0, "total": 0}
+        
+        progress = shared.thinker_progress
+        percent = progress.get_progress_percent()
+        
+        # 提取任务名称（从用户输入）
+        task_name = self.task_manager.current_input or "当前任务"
+        if len(task_name) > 20:
+            task_name = task_name[:20] + "..."
+        
+        return {
+            "name": task_name,
+            "percent": percent,
+            "step": progress.current_step,
+            "total": progress.total_steps,
+            "stage": progress.current_stage,
+        }
+
+    def _generate_task_confirmation_request(
+        self,
+        new_input: str,
+        progress_info: Dict[str, Any],
+        elapsed: float
+    ) -> str:
+        """生成任务确认请求"""
+        task_name = progress_info.get("name", "当前任务")
+        percent = progress_info.get("percent", 0)
+        step = progress_info.get("step", 0)
+        total = progress_info.get("total", 0)
+        
+        # 构建进度描述
+        if total > 0:
+            progress_desc = f"已执行 {step}/{total} 步 ({percent:.0f}%)"
+        else:
+            progress_desc = f"已执行 {elapsed:.0f}秒 ({percent:.0f}%)"
+        
+        # 截断新任务输入
+        new_task = new_input[:30] + "..." if len(new_input) > 30 else new_input
+        
+        return f"""
+[Talker] 检测到您想开始新任务「{new_task}」，当前任务「{task_name}」{progress_desc}。
+
+请选择如何处理：
+  1️⃣  取消当前任务，立即开始新任务（回复"1"或"取消"）
+  2️⃣  新任务加入队列，当前任务继续（回复"2"或"排队"）
+  3️⃣  完成后处理新任务（回复"3"或"稍后"）
+"""
+
+    # === 确认机制相关属性 ===
+    _pending_new_task: Optional[str] = None  # 待确认的新任务
+    _awaiting_confirmation: bool = False     # 是否等待确认
+
+    def _is_confirmation_reply(self, text: str) -> bool:
+        """检测是否是确认回复"""
+        if not self._awaiting_confirmation:
+            return False
+        text = text.lower().strip()
+        # 检测确认选项关键词
+        return any(k in text for k in ["1", "取消", "2", "排队", "3", "稍后"])
+
+    def _parse_confirmation_choice(self, text: str) -> Optional[str]:
+        """解析确认选择"""
+        text = text.lower().strip()
+        if "1" in text or "取消" in text:
+            return "cancel"
+        elif "2" in text or "排队" in text:
+            return "queue"
+        elif "3" in text or "稍后" in text:
+            return "after"
+        return None
