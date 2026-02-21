@@ -264,6 +264,21 @@ class TaskManager:
             question_patterns = ["吗", "？", "?", "呢", "什么", "怎么", "如何", "为什么"]
             if not any(q in text for q in question_patterns):
                 return UserIntent.COMMENT
+            # 包含疑问词的评论，可能是状态查询，继续到 QUERY_STATUS 检测
+            # 但需要额外的状态查询特征词
+            status_indicators = ["还", "在", "没", "未", "完", "成", "久", "慢", "等"]
+            if any(si in text for si in status_indicators):
+                return UserIntent.QUERY_STATUS
+            # 否则仍作为 COMMENT 处理
+
+        # === 3.1 增强疑问句检测 - 捕捉更多的状态查询 ===
+        # 即使用户输入没有命中 comment 关键词，但包含疑问词和等待/状态相关词
+        question_chars = ["吗", "？", "?", "呢"]
+        status_words = ["还", "在", "没", "未", "完", "成", "久", "慢", "等", "回", "应"]
+        has_question = any(qc in text for qc in question_chars)
+        has_status_word = any(sw in text for sw in status_words)
+        if has_question and has_status_word:
+            return UserIntent.QUERY_STATUS
 
         # === 4. 查询状态 ===
         # 已合并到 query_status 检测中
@@ -733,8 +748,8 @@ class TalkerThinkerApp:
                 # 问题类评论，简短回应
                 return True, f"\n[Talker] 好问题！正在处理「{current[:20]}...」，稍后给您详细回答"
             else:
-                # 其他评论，简短确认或静默
-                return True, None
+                # 其他评论，给予简单回应
+                return True, f"\n[Talker] 嗯，继续处理中..."
 
         elif intent == UserIntent.BACKCHANNEL:
             # 附和/应答，简短回应
