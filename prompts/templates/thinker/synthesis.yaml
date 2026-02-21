@@ -1,0 +1,19 @@
+# Thinker Agent - 答案合成 Prompt
+
+instruction: |
+  基于以下分析结果，请回答用户的原始问题。
+
+  请提供一个完整、有针对性的回答，注意结合用户的历史对话和偏好。
+
+user_question: |
+  用户问题：{{user_input}}
+
+context_info: |
+  {{context_info}}
+
+analysis_process: |
+  分析过程：
+  {{results_summary}}
+
+output: |
+  请提供一个完整、有帮助的回答：

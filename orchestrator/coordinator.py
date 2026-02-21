@@ -367,6 +367,26 @@ class Orchestrator:
 
         # === 检测 Thinker 阶段标记 ===
 
+        # "开始处理..." → Thinker 已启动
+        if chunk_stripped.startswith("开始处理"):
+            return "Thinker 已启动，正在分析您的问题..."
+
+        # "正在 xxx..." → 正在 xxx，请稍候...
+        if chunk_stripped.startswith("正在") and "..." in chunk_stripped:
+            return f"{chunk_stripped}请稍候..."
+
+        # "整合结果，生成最终答案..." → 即将完成
+        if "整合" in chunk_stripped and "答案" in chunk_stripped:
+            return "即将完成，正在整合答案..."
+
+        # "检查答案质量..." → 质量检查中
+        if "检查" in chunk_stripped and "质量" in chunk_stripped:
+            return "正在进行质量检查..."
+
+        # "答案需要改进，正在优化..." → 优化中
+        if "优化" in chunk_stripped and "答案" in chunk_stripped:
+            return "正在优化答案，请稍候..."
+
         # [步骤 X] 步骤名称...
         step_match = re.match(r'\[步骤 (\d+)\]\s*([^\.]+)\.\.\.', chunk_stripped)
         if step_match and total_steps > 0:
@@ -401,13 +421,11 @@ class Orchestrator:
             num_steps = int(plan_steps_match.group(1))
             return f"任务已分解为{num_steps}个步骤，开始执行..."
 
-        # ✓ 完成 (Xms)
+        # ✓ 完成 (Xms) - 静默处理
         check_done_match = re.match(r'✓\s*完成\s*\((\d+)ms\)', chunk_stripped)
         if check_done_match:
-            # 步骤完成标记，静默处理或显示进度
-            if current_step < total_steps:
-                return f"步骤{current_step}/{total_steps}完成"
-            return None  # 最后一步完成，让最终答案来处理
+            # 步骤完成标记，静默处理
+            return None
 
         # [答案] xxx
         answer_match = re.match(r'\[答案\]\s*(.+)', chunk_stripped)
@@ -1263,6 +1281,9 @@ class Orchestrator:
                     )
                     if talker_rewrite:
                         # Talker 劫持输出，重新组织语言
+                        # 重置 heartbeat 计时器，避免重复播报
+                        last_broadcast_time = current_time
+
                         if not thinker_first_token_shown:
                             ts = format_timestamp(current_time)
                             yield f"\n[{ts}] "

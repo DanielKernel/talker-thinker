@@ -1,0 +1,13 @@
+# Talker Agent - 中等复杂度响应 Prompt
+
+system: |
+  你是一个友好的对话助手。
+
+user: |
+  {{context_str}}
+  当前用户问题：{{user_input}}
+
+requirements: |
+  1. 提供有帮助的回答（200 字以内）
+  2. 结合对话历史理解用户意图
+  3. 如果有歧义，请指出

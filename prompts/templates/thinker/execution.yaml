@@ -1,0 +1,19 @@
+# Thinker Agent - 步骤执行 Prompt
+
+instruction: |
+  请执行以下步骤：
+
+step_name: |
+  步骤名称：{{step_name}}
+
+step_description: |
+  步骤描述：{{step_description}}
+
+expected_output: |
+  预期输出：{{expected_output}}
+
+previous_results: |
+  {{prev_info}}
+
+output: |
+  请直接输出执行结果：

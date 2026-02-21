@@ -11,6 +11,10 @@ from typing import Any, AsyncIterator, Callable, Dict, List, Optional
 from config import settings
 from context.types import QualityScore, StepResult, TaskComplexity, TaskStatus
 from agents.llm_client import LLMClient, StreamMetrics, create_llm_client
+from prompts.manager import PromptMgr
+from prompts.injectors.context_injector import ContextInjector
+from prompts.injectors.memory_injector import MemoryInjector
+from prompts.injectors.rag_injector import RAGInjector
 
 
 @dataclass
@@ -59,6 +63,12 @@ class ThinkerAgent:
         self.name = "thinker"
         self.timeout_ms = settings.THINKER_TIMEOUT_MS
         self.temperature = settings.THINKER_TEMPERATURE
+
+        # 初始化 PromptMgr
+        self.prompt_mgr = PromptMgr(template_dir="prompts/templates")
+        self.prompt_mgr.register_injector(ContextInjector())
+        self.prompt_mgr.register_injector(MemoryInjector())
+        self.prompt_mgr.register_injector(RAGInjector())
 
         # 进度回调
         self._progress_callback: Optional[Callable] = None
@@ -317,9 +327,38 @@ class ThinkerAgent:
                 skills_info = f"\n可用技能: {', '.join(skills)}"
         pref_info = self._format_user_preferences(context)
 
+        # 注入上下文信息
+        context_info = ""
+        if context:
+            # 用户原始输入（可能经过澄清更新）
+            effective_input = context.get("effective_input", user_input)
+            if effective_input != user_input:
+                context_info += f"\n用户原始需求：{effective_input}"
+
+            # 历史对话摘要
+            session_summary = context.get("session_summary", "")
+            if session_summary:
+                context_info += f"\n历史对话摘要：{session_summary}"
+
+            # 用户偏好
+            user_preferences = context.get("user_preferences", {})
+            if user_preferences:
+                pref_items = []
+                if "taste" in user_preferences:
+                    pref_items.append(f"口味偏好：{user_preferences['taste']}")
+                if "budget" in user_preferences:
+                    pref_items.append(f"预算：{user_preferences['budget']}")
+                if "car_type" in user_preferences:
+                    pref_items.append(f"车型偏好：{user_preferences['car_type']}")
+                if "likes" in user_preferences:
+                    pref_items.append(f"喜好：{', '.join(user_preferences['likes'])}")
+                if pref_items:
+                    context_info += "\n已知用户偏好：" + "；".join(pref_items)
+
         return f"""作为一个任务规划专家，请分析以下用户请求并制定执行计划：
 
 用户请求：{user_input}
+{context_info}
 {skills_info}
 {pref_info}
 
@@ -506,14 +545,38 @@ class ThinkerAgent:
             for r in step_results
         ])
 
+        # 注入上下文信息
+        context_info = ""
+        if context:
+            effective_input = context.get("effective_input", user_input)
+            if effective_input != user_input:
+                context_info += f"\n用户原始需求：{effective_input}"
+
+            session_summary = context.get("session_summary", "")
+            if session_summary:
+                context_info += f"\n历史对话摘要：{session_summary}"
+
+            user_preferences = context.get("user_preferences", {})
+            if user_preferences:
+                pref_items = []
+                if "taste" in user_preferences:
+                    pref_items.append(f"口味偏好：{user_preferences['taste']}")
+                if "budget" in user_preferences:
+                    pref_items.append(f"预算：{user_preferences['budget']}")
+                if "likes" in user_preferences:
+                    pref_items.append(f"喜好：{', '.join(user_preferences['likes'])}")
+                if pref_items:
+                    context_info += "\n已知用户偏好：" + "；".join(pref_items)
+
         prompt = f"""基于以下分析结果，请回答用户的原始问题：
 
 用户问题：{user_input}
+{context_info}
 
 分析过程：
 {results_summary}
 
-请提供一个完整、有帮助的回答："""
+请提供一个完整、有针对性的回答，注意结合用户的历史对话和偏好："""
 
         return await self.llm.generate(
             prompt,
@@ -782,3 +845,37 @@ class ThinkerAgent:
             "refinements": 0,
             "total_latency_ms": 0,
         }
+
+    def _build_context_info(self, context: Optional[Dict[str, Any]], user_input: str) -> str:
+        """构建上下文信息块（用于 PromptMgr 模板）"""
+        if not context:
+            return ""
+
+        parts = []
+
+        # 用户原始输入
+        effective_input = context.get("effective_input", user_input)
+        if effective_input != user_input:
+            parts.append(f"用户原始需求：{effective_input}")
+
+        # 历史对话摘要
+        session_summary = context.get("session_summary", "")
+        if session_summary:
+            parts.append(f"历史对话摘要：{session_summary}")
+
+        # 用户偏好
+        user_preferences = context.get("user_preferences", {})
+        if user_preferences:
+            pref_items = []
+            if "taste" in user_preferences:
+                pref_items.append(f"口味偏好：{user_preferences['taste']}")
+            if "budget" in user_preferences:
+                pref_items.append(f"预算：{user_preferences['budget']}")
+            if "car_type" in user_preferences:
+                pref_items.append(f"车型偏好：{user_preferences['car_type']}")
+            if "likes" in user_preferences:
+                pref_items.append(f"喜好：{', '.join(user_preferences['likes'])}")
+            if pref_items:
+                parts.append("已知用户偏好：" + "; ".join(pref_items))
+
+        return "\n".join(parts)

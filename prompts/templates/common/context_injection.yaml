@@ -1,0 +1,13 @@
+# 上下文注入模板
+
+# 用户原始需求
+effective_input: |
+  用户原始需求：{{effective_input}}
+
+# 历史对话摘要
+session_summary: |
+  历史对话摘要：{{session_summary}}
+
+# 用户偏好
+user_preferences: |
+  已知用户偏好：{{preferences_formatted}}

@@ -1,0 +1,7 @@
+# 记忆注入模板
+
+user_profile: |
+  用户画像：{{user_profile}}
+
+long_term_memory: |
+  长期记忆：{{long_term_memory}}
