@@ -106,6 +106,19 @@ class TalkerInput:
         ms = int((now % 1) * 1000)
         timestamp_formatted = f"{timestamp}.{ms:03d}"
 
+        # Wait for output to complete before showing input prompt
+        # This prevents the input prompt from appearing during Talker output
+        if self._output_event:
+            wait_start = time.time()
+            while not self._output_event.is_set():
+                # Timeout after 5 seconds to prevent infinite wait
+                if time.time() - wait_start > 5.0:
+                    logger.debug("Output event timeout, showing input prompt anyway")
+                    break
+                time.sleep(0.05)
+            # Clear the event for next round
+            # Note: The event will be set again when the next output starts
+
         try:
             user_input = prompt(
                 message=[
@@ -150,6 +163,10 @@ class FallbackInput:
     def __init__(self, history_file: str = None):
         pass
 
+    def set_output_event(self, event: asyncio.Event) -> None:
+        """Set the output event for synchronizing input prompt display"""
+        self._output_event = event
+
     def get_input(self, session_id: str = None) -> str:
         """Get user input using native input()"""
         import time
@@ -159,6 +176,14 @@ class FallbackInput:
         except RuntimeError:
             loop = asyncio.new_event_loop()
             asyncio.set_event_loop(loop)
+
+        # Wait for output to complete before showing input prompt
+        if hasattr(self, '_output_event') and self._output_event:
+            wait_start = time.time()
+            while not self._output_event.is_set():
+                if time.time() - wait_start > 5.0:
+                    break
+                time.sleep(0.05)
 
         now = time.time()
         timestamp = time.strftime("%H:%M:%S", time.localtime(now))

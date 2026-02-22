@@ -631,6 +631,10 @@ class TalkerThinkerApp:
 
         result = "".join(result_chunks)
 
+        # 确保任务完成时事件被设置（即使没有输出）
+        if output_event and not output_event.is_set():
+            output_event.set()
+
         # 记录指标
         elapsed = (asyncio.get_event_loop().time() - start_time) * 1000
         self.metrics.record_latency(
@@ -961,8 +965,6 @@ class TalkerThinkerApp:
         async def read_input():
             """异步读取用户输入 - 使用 prompt_toolkit"""
             loop = asyncio.get_event_loop()
-            wait_start_time = 0
-            skip_next_wait = False  # 标记是否跳过下次等待（用户刚输入后）
             while True:
                 try:
                     # 检测关闭信号
@@ -970,34 +972,13 @@ class TalkerThinkerApp:
                         logger.info("Shutdown signal detected, exiting...")
                         break
 
-                    # 等待输出完成后再显示输入提示
-                    # 这确保了输入提示不会在 Talker 输出过程中显示
-                    # 但如果是用户刚输入完，跳过等待，立即允许输入
-                    if not skip_next_wait:
-                        while not output_complete_event.is_set():
-                            # 防止无限等待：如果超过 5 秒未设置，强制继续
-                            if wait_start_time == 0:
-                                wait_start_time = time.time()
-                            elif time.time() - wait_start_time > 5.0:
-                                logger.debug("output_complete_event timeout, forcing continue")
-                                wait_start_time = 0  # 重置
-                                break
-                            await asyncio.sleep(0.1)
-
-                        # 重置等待时间
-                        wait_start_time = 0
-
-                    # 重置跳过标记
-                    skip_next_wait = False
-
                     # 使用 prompt_toolkit 获取输入（支持中文编辑）
-                    # 注意：即使 timeout 后也继续获取输入，确保用户可以输入 exit/quit
+                    # 注意：get_input 内部会等待 output_complete_event 被设置后才显示提示符
                     line = await loop.run_in_executor(None, input_handler.get_input, session_id)
 
-                    # 获取到输入后，立即清除事件，防止在输出过程中显示下一个输入提示
+                    # 获取到输入后，立即清除事件
+                    # 这样下次 get_input 调用时会等待输出完成后再显示提示符
                     output_complete_event.clear()
-                    # 标记下次循环跳过等待，因为用户刚输入完
-                    skip_next_wait = True
 
                     await input_queue.put(line)
                 except EOFError:
