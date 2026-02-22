@@ -56,6 +56,7 @@ class TestExitQuitCommands:
     修复方式：
     1. 在 _handle_new_input_during_processing 中检测 exit/quit 并返回 __EXIT__
     2. 在主循环和内部循环中检测 __EXIT__ 标记并 break
+    3. 修复 read_input 中的死锁逻辑，移除超时后的 continue 检查
 
     原始问题对话：
     [18:41:33.574] Talker: 正在优化答案，请稍候...
@@ -100,6 +101,24 @@ class TestExitQuitCommands:
             "_handle_new_input_during_processing 必须返回 __EXIT__ 标记"
         assert 'quit' in source.lower() or 'exit' in source.lower(), \
             "_handle_new_input_during_processing 必须检测 quit/exit 命令"
+
+    @pytest.mark.asyncio
+    async def test_cancel_command_during_processing(self):
+        """测试在处理过程中"取消"命令直接取消任务"""
+        app = TalkerThinkerApp()
+        await app.initialize()
+
+        app.task_manager._current_input = "复杂任务"
+        app.task_manager._is_processing = True
+
+        # 输入"取消"应该返回响应并取消任务
+        handled, response = await app._handle_new_input_during_processing(
+            "取消", "test_session"
+        )
+
+        assert handled is True, "应该处理'取消'命令"
+        assert response is not None, "应该返回响应内容"
+        assert "取消" in response, f"响应应该包含'取消'：{response}"
 
 
 class TestTalkerNoResponse:
@@ -272,7 +291,9 @@ class TestReadInputTimeout:
     测试用例：read_input 无限等待 output_complete_event
 
     Bug 描述：read_input 中 while not output_complete_event.is_set() 可能无限等待
-    修复方式：添加 5 秒超时保护
+    修复方案：
+    1. 添加 5 秒超时保护
+    2. 移除超时后的 continue 检查，确保输入可以继续获取
 
     这是导致"无法输入"的根本原因之一
     """
@@ -288,6 +309,44 @@ class TestReadInputTimeout:
             "read_input 必须有 wait_start_time 追踪变量"
         assert '5.0' in source or '5 ' in source, \
             "read_input 必须有 5 秒超时保护"
+
+    def test_read_input_no_continue_after_timeout(self):
+        """测试 read_input 在超时后没有 continue 检查，确保输入可以继续获取"""
+        import inspect
+        from main import TalkerThinkerApp
+
+        source = inspect.getsource(TalkerThinkerApp.run_interactive)
+
+        # 检查 read_input 函数中不应该有超时后的 continue 检查
+        # 查找 pattern: "if not output_complete_event.is_set():\n                        continue"
+        # 这个 pattern 在 timeout 之后不应该存在
+
+        lines = source.split('\n')
+        in_read_input = False
+        found_timeout_check = False
+        found_continue_after_timeout = False
+
+        for i, line in enumerate(lines):
+            if 'async def read_input' in line:
+                in_read_input = True
+            if in_read_input and 'forcing continue' in line:
+                found_timeout_check = True
+                # 检查接下来几行是否有 continue
+                for j in range(i+1, min(i+10, len(lines))):
+                    if 'if not output_complete_event.is_set()' in lines[j]:
+                        # 找到检查，再检查后面是否有 continue
+                        for k in range(j+1, min(j+5, len(lines))):
+                            if 'continue' in lines[k] and lines[k].strip().startswith('continue'):
+                                found_continue_after_timeout = True
+                                break
+                        break
+
+            # 找到下一个函数定义，结束检查
+            if in_read_input and (line.strip().startswith('async def ') or line.strip().startswith('def ')) and 'read_input' not in line:
+                break
+
+        assert not found_continue_after_timeout, \
+            "read_input 在超时后不应该有 continue 检查，这会导致死锁"
 
 
 class TestSignalHandling:

@@ -719,6 +719,7 @@ class TalkerThinkerApp:
         - COMMENT 和 BACKCHANNEL 不打断任务，但 Talker 应该回应
         - 只有 REPLACE 才真正取消任务
         - 用户的问题应该得到实时反馈
+        - "取消"命令直接取消当前任务
 
         Returns:
             tuple: (是否已处理，响应内容)
@@ -727,6 +728,11 @@ class TalkerThinkerApp:
         if new_input.lower() in ("quit", "exit"):
             await self.task_manager.cancel_current_task()
             return True, "__EXIT__"  # 特殊标记，主循环检测到此标记应退出
+
+        # "取消"命令直接取消当前任务
+        if new_input.strip() == "取消":
+            await self.task_manager.cancel_current_task()
+            return True, "\n[Talker] 好的，已取消当前任务"
 
         interrupt_action, replacement_input = self.task_manager.decide_interrupt_action(new_input)
         intent = self.task_manager.classify_intent(new_input)
@@ -969,11 +975,8 @@ class TalkerThinkerApp:
                     # 重置等待时间
                     wait_start_time = 0
 
-                    # 再次检查事件，避免在等待期间被清除
-                    if not output_complete_event.is_set():
-                        continue
-
                     # 使用 prompt_toolkit 获取输入（支持中文编辑）
+                    # 注意：即使 timeout 后也继续获取输入，确保用户可以输入 exit/quit
                     line = await loop.run_in_executor(None, input_handler.get_input, session_id)
 
                     # 获取到输入后，立即清除事件，防止在输出过程中显示下一个输入提示

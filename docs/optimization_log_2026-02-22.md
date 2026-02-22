@@ -126,6 +126,7 @@ if exit_requested:
 | `TestExitQuitCommands` | `test_quit_command_when_idle` | exit/quit 无法退出 |
 | `TestExitQuitCommands` | `test_exit_command_when_idle` | exit/quit 无法退出 |
 | `TestExitQuitCommands` | `test_handle_new_input_during_processing_exit` | exit/quit 无法退出 |
+| `TestExitQuitCommands` | `test_cancel_command_during_processing` | "取消"命令无效 |
 | `TestTalkerNoResponse` | `test_classify_slow_comment` | Talker 不响应 |
 | `TestTalkerNoResponse` | `test_classify_still_there_question` | Talker 不响应 |
 | `TestTalkerNoResponse` | `test_handle_new_input_slow_comment` | Talker 不响应 |
@@ -135,6 +136,7 @@ if exit_requested:
 | `TestInfiniteLoop` | `test_delegation_handoff_loop_protection` | 无限循环卡死 |
 | `TestTaskCancellationTimeout` | `test_cancel_current_task_timeout` | 取消时无限等待 |
 | `TestReadInputTimeout` | `test_read_input_timeout_protection` | read_input 无限等待 |
+| `TestReadInputTimeout` | `test_read_input_no_continue_after_timeout` | read_input 死锁逻辑 |
 | `TestSignalHandling` | `test_signal_handlers_registered` | 无法正常退出 |
 | `TestIntegrationScenarios` | `test_user_can_input_during_thinker_processing` | 集成测试 |
 | `TestIntegrationScenarios` | `test_user_can_exit_during_processing` | 集成测试 |
@@ -160,10 +162,10 @@ pytest tests/test_regression.py -v
 ### 验证结果
 
 ```
-======================== 17 passed, 1 warning in 0.05s =========================
+======================= 136 passed, 1 warning in 10.12s =======================
 ```
 
-所有回归测试用例通过。
+所有测试用例通过（包括 19 个回归测试用例）。
 
 ---
 
@@ -175,6 +177,105 @@ pytest tests/test_regression.py -v
 
 ---
 
-*文档创建时间：2026-02-22*
-*修复人员：Claude*
-*审核状态：已完成*
+## 2026-02-22 补充修复 output_complete_event timeout 问题
+
+### 问题概述
+
+用户报告在交互过程中出现 `output_complete_event timeout, forcing continue` 警告，输入 exit、quit、取消等命令无法退出，系统卡死。
+
+**错误日志**：
+```
+[20:31:00.836] 你：
+20:31:14,529 [WARNING] main - output_complete_event timeout, forcing continue
+20:31:19,561 [WARNING] main - output_complete_event timeout, forcing continue
+20:31:24,594 [WARNING] main - output_complete_event timeout, forcing continue
+20:31:29,626 [WARNING] main - output_complete_event timeout, forcing continue
+20:33:05,205 [WARNING] main - output_complete_event timeout, forcing continue
+取消
+
+exit
+20:33:10,234 [WARNING] main - output_complete_event timeout, forcing continue
+20:33:15,261 [WARNING] main - output_complete_event timeout, forcing continue
+quit
+```
+
+### 根本原因分析
+
+**原因 1：read_input 函数中的死锁逻辑**
+
+在 `main.py` 的 `read_input()` 函数中（第 973-974 行），存在以下逻辑：
+
+```python
+# 再次检查事件，避免在等待期间被清除
+if not output_complete_event.is_set():
+    continue
+```
+
+这段代码的意图是在超时强制 break 后检查事件状态，但如果事件未被设置就 `continue`，会导致：
+1. 超时 break 后，`wait_start_time` 被重置为 0
+2. 检查事件为 False 后执行 `continue`，跳过输入获取
+3. 回到循环开始，再次进入 `while not output_complete_event.is_set()` 等待
+4. 由于 `wait_start_time` 为 0，重新开始计时，再等 5 秒超时
+5. 形成无限循环：等待→超时→continue→等待→超时→...
+
+**原因 2："取消"命令没有直接处理**
+
+在 `_handle_new_input_during_processing()` 方法中，"取消"命令没有被直接处理：
+- 当用户输入"取消"时，`classify_intent()` 可能将其分类为 REPLACE 意图
+- 代码进入任务确认逻辑，要求用户选择"取消/排队/稍后"
+- 但用户已经输入"取消"，期望直接取消任务，而不是再次确认
+
+### 修复方案
+
+**修复 1：移除 read_input 中的死锁检查**
+
+删除第 973-974 行的检查，确保超时后仍然可以获取用户输入：
+
+```python
+# 修改前：
+while not output_complete_event.is_set():
+    # 超时保护...
+    break
+
+# 再次检查事件，避免在等待期间被清除
+if not output_complete_event.is_set():
+    continue  # ← 删除这行
+
+# 使用 prompt_toolkit 获取输入
+line = await loop.run_in_executor(...)
+```
+
+**修复 2：直接处理"取消"命令**
+
+在 `_handle_new_input_during_processing()` 方法开头添加"取消"命令的处理：
+
+```python
+# "取消"命令直接取消当前任务
+if new_input.strip() == "取消":
+    await self.task_manager.cancel_current_task()
+    return True, "\n[Talker] 好的，已取消当前任务"
+```
+
+### 回归测试用例
+
+| 测试类 | 测试用例 | 对应问题 |
+|--------|----------|----------|
+| `TestExitQuitCommands` | `test_cancel_command_during_processing` | "取消"命令直接取消任务 |
+| `TestReadInputTimeout` | `test_read_input_no_continue_after_timeout` | read_input 超时后无死锁 |
+
+### 修改文件清单
+
+| 文件路径 | 修改类型 | 修改内容 |
+|----------|----------|----------|
+| `main.py` | 修复 | 移除 read_input 中的死锁 continue 检查 |
+| `main.py` | 修复 | 添加"取消"命令的直接处理逻辑 |
+| `tests/test_regression.py` | 新增 | 添加 `test_cancel_command_during_processing` 测试 |
+| `tests/test_regression.py` | 新增 | 添加 `test_read_input_no_continue_after_timeout` 测试 |
+
+### 验证结果
+
+```
+======================= 136 passed, 1 warning in 10.12s =======================
+```
+
+所有 136 个测试用例通过（包括 19 个回归测试用例）。
