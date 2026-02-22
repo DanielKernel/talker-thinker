@@ -1089,12 +1089,17 @@ class Orchestrator:
         async def run_talker():
             """运行Talker并收集输出"""
             nonlocal talker_complete
-            async for chunk in self.talker.process(user_input, context):
-                await talker_queue.put(chunk)
-            talker_complete = True
+            try:
+                async for chunk in self.talker.process(user_input, context):
+                    await talker_queue.put(chunk)
+            except Exception as e:
+                logger.error(f"Talker task error: {e}")
+            finally:
+                talker_complete = True
 
         # 启动Talker任务
         talker_task = asyncio.create_task(run_talker())
+        TALKER_TIMEOUT = 120.0  # 120 秒超时
 
         # 处理Talker输出
         first_token_time = None
@@ -1115,6 +1120,13 @@ class Orchestrator:
         while not talker_complete or not talker_queue.empty():
             current_time = time.time()
             elapsed = current_time - llm_request_time
+            
+            # 超时保护
+            # 超时保护
+            if elapsed > TALKER_TIMEOUT:
+                logger.warning(f"Talker task timeout ({TALKER_TIMEOUT}s), cancelling...")
+                talker_task.cancel()
+                break
 
             # === 播报检查 ===
             broadcast_interval = get_talker_broadcast_interval(elapsed)
@@ -1394,17 +1406,37 @@ class Orchestrator:
         async def run_thinker():
             """运行Thinker并收集输出"""
             nonlocal thinker_complete
-            async for chunk in self.thinker.process(user_input, context):
-                thinker_output.append(chunk)
-            thinker_complete = True
+            try:
+                async for chunk in self.thinker.process(user_input, context):
+                    thinker_output.append(chunk)
+            except Exception as e:
+                logger.error(f"Thinker task error: {e}")
+            finally:
+                thinker_complete = True
 
         # 启动Thinker任务
         thinker_task = asyncio.create_task(run_thinker())
+        THINKER_TIMEOUT = 300.0  # 300 秒超时
 
         # 主循环：处理Thinker输出和播报
+        # 添加超时保护变量
+        last_output_time = thinker_start
+        max_wait_time = 30.0  # 最大等待时间（秒）
+        
         while not thinker_complete or output_index < len(thinker_output):
             current_time = time.time()
             elapsed = current_time - thinker_start
+            
+            # 超时保护 1: 整体任务超时
+            if elapsed > THINKER_TIMEOUT:
+                logger.warning(f"Thinker task timeout ({THINKER_TIMEOUT}s), cancelling...")
+                thinker_task.cancel()
+                break
+            
+            # 超时保护 2: Thinker 已完成但输出处理卡住
+            if thinker_complete and current_time - last_output_time > max_wait_time:
+                logger.warning(f"Thinker output processing timeout ({max_wait_time}s), breaking loop...")
+                break
 
             # === 播报检查 ===
             broadcast_interval = get_broadcast_interval(elapsed)
@@ -1510,6 +1542,7 @@ class Orchestrator:
                 chunk = thinker_output[output_index]
                 output_index += 1
                 accumulated_output += chunk
+                last_output_time = current_time  # 更新最后输出时间
 
                 # 解析阶段（用于状态更新）
                 if shared and shared.thinker_progress.current_stage != "idle":

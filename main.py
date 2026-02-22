@@ -1027,38 +1027,43 @@ class TalkerThinkerApp:
                     )
                     pending_new_input: Optional[str] = None
 
-                    # 等待任务完成，同时监听新输入
-                    while not process_task.done():
-                        try:
-                            new_input = await asyncio.wait_for(
-                                input_queue.get(),
-                                timeout=0.2
-                            )
-                            # 有新输入，处理打断逻辑
-                            if new_input.strip():
-                                # 1. 先处理获取响应
-                                handled, response = await self._handle_new_input_during_processing(
-                                    new_input, session_id
+                    try:
+                        # 等待任务完成，同时监听新输入
+                        while not process_task.done():
+                            try:
+                                new_input = await asyncio.wait_for(
+                                    input_queue.get(),
+                                    timeout=0.2
                                 )
-
-                                # 2. 先显示 Talker 响应（如果有）
-                                if handled:
-                                    if response:
-                                        print(response)
-                                    # 显示响应后，设置事件允许显示下一个输入提示
-                                    output_complete_event.set()
-                                else:
-                                    # 需要处理新任务，保持事件清除状态
-                                    pending_new_input = (
-                                        self.task_manager.pending_replacement_input
-                                        or new_input.strip()
+                                # 有新输入，处理打断逻辑
+                                if new_input.strip():
+                                    # 1. 先处理获取响应
+                                    handled, response = await self._handle_new_input_during_processing(
+                                        new_input, session_id
                                     )
-                                    self.task_manager.set_pending_replacement_input(None)
-                                    input_time = time.time()
-                                    break  # 退出等待循环，开始处理新任务
 
-                        except asyncio.TimeoutError:
-                            continue
+                                    # 2. 先显示 Talker 响应（如果有）
+                                    if handled:
+                                        if response:
+                                            print(response)
+                                        # 显示响应后，设置事件允许显示下一个输入提示
+                                        output_complete_event.set()
+                                    else:
+                                        # 需要处理新任务，保持事件清除状态
+                                        pending_new_input = (
+                                            self.task_manager.pending_replacement_input
+                                            or new_input.strip()
+                                        )
+                                        self.task_manager.set_pending_replacement_input(None)
+                                        input_time = time.time()
+                                        break  # 退出等待循环，开始处理新任务
+
+                            except asyncio.TimeoutError:
+                                continue
+                    finally:
+                        # 确保事件总是被设置（防止任务异常退出时卡死）
+                        if not output_complete_event.is_set():
+                            output_complete_event.set()
 
                     # 如果任务完成，清理状态
                     if process_task.done():

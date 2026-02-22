@@ -406,6 +406,175 @@ def _generate_response(self, user_input: str) -> str:
 
 ---
 
+---
+
+## 卡死问题修复记录 (2026-02-22)
+
+### 问题描述
+
+用户报告 Talker/Thinker 在完成一系列任务后系统卡死：
+- 无法应答客户问题
+- 无法退出（只能 Ctrl+C 强制退出）
+- 有问题的对话显示 Talker 开始响应但系统随后挂起
+
+### 根本原因分析
+
+通过分析 `orchestrator/coordinator.py` 和 `main.py`，发现以下潜在问题：
+
+#### 1. `_collaboration_handoff` 方法中的循环退出条件问题
+
+**问题位置**: `coordinator.py:1415-1588`
+
+**问题描述**: 当 `thinker_complete=True` 但 `output_index == len(thinker_output)` 时，循环应该退出。但如果在处理最后一个 chunk 时发生异常，可能导致状态不一致，造成死循环。
+
+#### 2. `output_complete_event` 未正确设置
+
+**问题位置**: `main.py:1022-1084`
+
+**问题描述**: 如果任务在处理过程中抛出异常或被取消，`output_complete_event.set()` 可能永远不会被调用，导致输入读取任务永久阻塞。
+
+#### 3. `_delegation_handoff` 中的 Talker 任务阻塞
+
+**问题位置**: `coordinator.py:1089-1196`
+
+**问题描述**: 如果 LLM stream 没有正确完成，`talker_complete` 永远不会设为 True，导致 while 循环永久阻塞。
+
+### 修复方案
+
+#### 修复 1: Talker 任务添加超时保护和异常处理
+
+**文件**: `orchestrator/coordinator.py`
+
+**修改内容**:
+```python
+async def run_talker():
+    """运行 Talker 并收集输出"""
+    nonlocal talker_complete
+    try:
+        async for chunk in self.talker.process(user_input, context):
+            await talker_queue.put(chunk)
+    except Exception as e:
+        logger.error(f"Talker task error: {e}")
+    finally:
+        talker_complete = True
+
+# 启动 Talker 任务，添加超时保护
+talker_task = asyncio.create_task(run_talker())
+TALKER_TIMEOUT = 120.0  # 120 秒超时
+
+# 在 while 循环中添加超时检查
+while not talker_complete or not talker_queue.empty():
+    current_time = time.time()
+    elapsed = current_time - llm_request_time
+    
+    # 超时保护
+    if elapsed > TALKER_TIMEOUT:
+        logger.warning(f"Talker task timeout ({TALKER_TIMEOUT}s), cancelling...")
+        talker_task.cancel()
+        break
+```
+
+#### 修复 2: Thinker 任务添加超时保护和异常处理
+
+**文件**: `orchestrator/coordinator.py`
+
+**修改内容**:
+```python
+async def run_thinker():
+    """运行 Thinker 并收集输出"""
+    nonlocal thinker_complete
+    try:
+        async for chunk in self.thinker.process(user_input, context):
+            thinker_output.append(chunk)
+    except Exception as e:
+        logger.error(f"Thinker task error: {e}")
+    finally:
+        thinker_complete = True
+
+# 启动 Thinker 任务，添加超时保护
+thinker_task = asyncio.create_task(run_thinker())
+THINKER_TIMEOUT = 300.0  # 300 秒超时
+```
+
+#### 修复 3: `_collaboration_handoff` 循环添加超时保护
+
+**文件**: `orchestrator/coordinator.py`
+
+**修改内容**:
+```python
+# 主循环：处理 Thinker 输出和播报
+# 添加超时保护变量
+last_output_time = thinker_start
+max_wait_time = 30.0  # 最大等待时间（秒）
+
+while not thinker_complete or output_index < len(thinker_output):
+    current_time = time.time()
+    elapsed = current_time - thinker_start
+    
+    # 超时保护 1: 整体任务超时
+    if elapsed > THINKER_TIMEOUT:
+        logger.warning(f"Thinker task timeout ({THINKER_TIMEOUT}s), cancelling...")
+        thinker_task.cancel()
+        break
+    
+    # 超时保护 2: Thinker 已完成但输出处理卡住
+    if thinker_complete and current_time - last_output_time > max_wait_time:
+        logger.warning(f"Thinker output processing timeout ({max_wait_time}s), breaking loop...")
+        break
+    
+    # ... 处理输出时更新 last_output_time
+    if output_index < len(thinker_output):
+        chunk = thinker_output[output_index]
+        output_index += 1
+        accumulated_output += chunk
+        last_output_time = current_time  # 更新最后输出时间
+```
+
+#### 修复 4: `output_complete_event` 总是被设置
+
+**文件**: `main.py`
+
+**修改内容**:
+```python
+try:
+    # 等待任务完成，同时监听新输入
+    while not process_task.done():
+        # ... 原有逻辑
+finally:
+    # 确保事件总是被设置（防止任务异常退出时卡死）
+    if not output_complete_event.is_set():
+        output_complete_event.set()
+```
+
+### 受影响的文件
+
+| 文件 | 修改位置 | 说明 |
+|------|----------|------|
+| `orchestrator/coordinator.py` | line 1089-1102 | Talker 任务异常处理和超时保护 |
+| `orchestrator/coordinator.py` | line 1119-1124 | Talker 循环超时检查 |
+| `orchestrator/coordinator.py` | line 1404-1420 | Thinker 任务异常处理和超时保护 |
+| `orchestrator/coordinator.py` | line 1415-1435 | Thinker 循环超时检查 |
+| `orchestrator/coordinator.py` | line 1520 | 输出处理时更新 last_output_time |
+| `main.py` | line 1020-1074 | output_complete_event 总是被设置 |
+
+### 验证步骤
+
+1. **语法检查**: 已通过 `python3 -m py_compile` 验证
+2. **单元测试**: 待运行 `pytest tests/test_orchestrator.py -v`
+3. **集成测试**: 待运行 `python -m evals run --category simple`
+4. **手动测试**: 
+   - 运行交互模式，执行复杂任务
+   - 在任务执行过程中发送新输入
+   - 尝试退出命令验证是否正常响应
+
+### 预期效果
+
+- 任务完成后系统能正常响应新输入
+- 退出命令 (`quit`/`exit`) 能正常退出
+- Ctrl+C 能正常中断当前任务
+- LLM 任务超时时能自动取消并恢复响应
+
+---
 ## 评测记录历史
 
 | 评测日期 | 评测 ID | 通过率 | 平均得分 | 备注 |
