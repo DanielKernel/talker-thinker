@@ -727,6 +727,21 @@ class Orchestrator:
         """从用户问题中提取主题"""
         query_lower = query.lower()
 
+        # === 第一轮：从用户问题中提取具体名词作为主题 ===
+        # 优先提取用户实际提到的内容，而不是预定义话题
+        # 先检查具体的物品/主题关键词（排除通用话题词）
+        specific_topics = [
+            "羽绒服", "棉服", "外套", "衣服", "服装",  # 服装类
+            "手机", "电脑", "平板", "耳机", "相机", "数码",  # 数码类
+            "房子", "装修", "家具", "家电",  # 家居类
+            "书", "电影", "电视剧", "游戏", "音乐",  # 娱乐类
+            "课程", "学习", "考试", "培训",  # 学习类
+        ]
+
+        for topic in specific_topics:
+            if topic in query_lower:
+                return topic
+
         # 话题关键词配置：按优先级排序，具体话题在前，通用话题在后
         # 每个话题的关键词按特异性排序，具体词在前，通用词在后
         topic_keywords = [
@@ -734,30 +749,34 @@ class Orchestrator:
             ("奶茶", ["奶茶", "波霸", "珍珠奶茶", "鲜奶茶"]),
             ("咖啡", ["咖啡", "拿铁", "星巴克", "瑞幸", "美式", "卡布奇诺"]),
             ("打车", ["打车", "滴滴", "高德", "专车", "快车", "网约车"]),
-            ("选车", ["车", "汽车", "车型", "品牌", "suv", "轿车", "买车", "选车", "新能源车"]),
             ("旅游", ["旅游", "旅行", "景点", "酒店", "机票", "去哪玩", "出去玩"]),
             ("美食", ["美食", "餐厅", "餐馆", "菜", "吃", "推荐菜", "小吃", "甜品"]),
             # 通用话题放最后（避免过度匹配）
             ("购物", ["购物", "价格", "便宜", "对比", "买东西"]),
+            ("选车", ["买车", "选车", "新能源车"]),  # "选车" 放后面，避免"车"字过度匹配
         ]
 
-        # 第一轮：精确匹配具体话题
+        # 第二轮：精确匹配具体话题
         for topic, keywords in topic_keywords:
             if any(kw in query_lower for kw in keywords):
                 return topic
 
-        # 第二轮：检查是否包含"买"字但没有具体话题
+        # 第三轮：检查是否包含"买"字但没有具体话题
         # 如果查询中有具体物品（如"买奶茶"），提取物品名作为话题
         if "买" in query_lower:
             # 尝试提取"买"后面的物品
-            match = re.search(r'买 ([\u4e00-\u9fa5]{2,6})', query_lower)
+            match = re.search(r'买 ([\u4e00-\u9fa5]{2,8})', query_lower)
             if match:
                 return match.group(1)
 
-        # 第三轮：提取问题中的关键词作为主题
+        # 第四轮：提取问题中的关键词作为主题（排除通用词）
+        # 排除容易误匹配的通用词
+        exclude_words = ["一些", "一个", "一起", "一定", "分析", "建议", "帮助", "比较", "看看"]
         words = re.findall(r'[\u4e00-\u9fa5]{2,4}', query)
-        if words:
-            return words[0]
+        for word in words:
+            if word not in exclude_words:
+                return word
+
         return "您的问题"
 
     def _extract_user_preferences(self, text: str) -> Dict[str, Any]:

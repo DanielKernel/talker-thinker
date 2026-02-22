@@ -585,7 +585,7 @@ class TalkerThinkerApp:
             {"agent": progress.get("agent", "unknown")},
         )
 
-    async def process(self, user_input: str, session_id: Optional[str] = None, received_time: Optional[float] = None) -> str:
+    async def process(self, user_input: str, session_id: Optional[str] = None, received_time: Optional[float] = None, output_event: Optional[asyncio.Event] = None) -> str:
         """
         处理用户输入
 
@@ -593,6 +593,7 @@ class TalkerThinkerApp:
             user_input: 用户输入
             session_id: 会话 ID（可选）
             received_time: 消息接收时间（可选）
+            output_event: 输出完成事件（可选），用于控制输入提示显示时机
 
         Returns:
             str: 系统响应
@@ -605,6 +606,7 @@ class TalkerThinkerApp:
         # 收集流式响应
         result_chunks = []
         first_token_time = None
+        output_started = False
         try:
             async for chunk in self.orchestrator.process(user_input, session_id, received_time=received_time):
                 # 检查是否被取消
@@ -612,6 +614,10 @@ class TalkerThinkerApp:
                     break
                 if first_token_time is None and chunk.strip():
                     first_token_time = time.time()
+                    # 首次输出时，设置输出事件，允许显示输入提示
+                    if output_event and not output_event.is_set():
+                        output_event.set()
+                        output_started = True
                 result_chunks.append(chunk)
                 # 实时输出（用于 CLI 模式）
                 print(chunk, end="", flush=True)
@@ -619,6 +625,9 @@ class TalkerThinkerApp:
             # 任务被取消
             result_chunks.append("\n\n⚠️ 任务已取消")
             print("\n\n⚠️ 任务已取消", end="", flush=True)
+            # 取消时也设置输出事件
+            if output_event and not output_event.is_set():
+                output_event.set()
 
         result = "".join(result_chunks)
 
@@ -633,10 +642,10 @@ class TalkerThinkerApp:
 
         return result
 
-    async def _process_as_task(self, user_input: str, session_id: str, received_time: float) -> asyncio.Task:
+    async def _process_as_task(self, user_input: str, session_id: str, received_time: float, output_event: Optional[asyncio.Event] = None) -> asyncio.Task:
         """创建处理任务"""
         task = asyncio.create_task(
-            self.process(user_input, session_id, received_time)
+            self.process(user_input, session_id, received_time, output_event=output_event)
         )
         self.task_manager.start_task(task, user_input)
         return task
@@ -953,6 +962,7 @@ class TalkerThinkerApp:
             """异步读取用户输入 - 使用 prompt_toolkit"""
             loop = asyncio.get_event_loop()
             wait_start_time = 0
+            skip_next_wait = False  # 标记是否跳过下次等待（用户刚输入后）
             while True:
                 try:
                     # 检测关闭信号
@@ -962,18 +972,23 @@ class TalkerThinkerApp:
 
                     # 等待输出完成后再显示输入提示
                     # 这确保了输入提示不会在 Talker 输出过程中显示
-                    while not output_complete_event.is_set():
-                        # 防止无限等待：如果超过 5 秒未设置，强制继续
-                        if wait_start_time == 0:
-                            wait_start_time = time.time()
-                        elif time.time() - wait_start_time > 5.0:
-                            logger.debug("output_complete_event timeout, forcing continue")
-                            wait_start_time = 0  # 重置
-                            break
-                        await asyncio.sleep(0.1)
+                    # 但如果是用户刚输入完，跳过等待，立即允许输入
+                    if not skip_next_wait:
+                        while not output_complete_event.is_set():
+                            # 防止无限等待：如果超过 5 秒未设置，强制继续
+                            if wait_start_time == 0:
+                                wait_start_time = time.time()
+                            elif time.time() - wait_start_time > 5.0:
+                                logger.debug("output_complete_event timeout, forcing continue")
+                                wait_start_time = 0  # 重置
+                                break
+                            await asyncio.sleep(0.1)
 
-                    # 重置等待时间
-                    wait_start_time = 0
+                        # 重置等待时间
+                        wait_start_time = 0
+
+                    # 重置跳过标记
+                    skip_next_wait = False
 
                     # 使用 prompt_toolkit 获取输入（支持中文编辑）
                     # 注意：即使 timeout 后也继续获取输入，确保用户可以输入 exit/quit
@@ -981,6 +996,8 @@ class TalkerThinkerApp:
 
                     # 获取到输入后，立即清除事件，防止在输出过程中显示下一个输入提示
                     output_complete_event.clear()
+                    # 标记下次循环跳过等待，因为用户刚输入完
+                    skip_next_wait = True
 
                     await input_queue.put(line)
                 except EOFError:
@@ -1066,10 +1083,11 @@ class TalkerThinkerApp:
 
                     self.task_manager._cancelled = False
                     process_task = await self._process_as_task(
-                        user_input, session_id, input_time
+                        user_input, session_id, input_time, output_event=output_complete_event
                     )
-                    # 任务启动后，立即设置事件允许用户输入（支持全双工交互）
-                    output_complete_event.set()
+                    # 注意：任务启动后不立即 set() 事件
+                    # 让 read_input 循环等待，直到首次输出后再允许输入
+                    # 这样可以避免用户输入后立即显示下一个输入提示符
 
                     pending_new_input: Optional[str] = None
                     exit_requested = False  # 标记是否请求退出
@@ -1133,7 +1151,7 @@ class TalkerThinkerApp:
                             user_input = pending_new_input
                             self.task_manager._cancelled = False
                             process_task = await self._process_as_task(
-                                user_input, session_id, input_time
+                                user_input, session_id, input_time, output_event=output_complete_event
                             )
                             # 重置退出标记
                             exit_requested = False
@@ -1194,7 +1212,7 @@ class TalkerThinkerApp:
                         self.task_manager._cancelled = False
                         user_input = pending_new_input or user_input
                         process_task = await self._process_as_task(
-                            user_input, session_id, input_time
+                            user_input, session_id, input_time, output_event=output_complete_event
                         )
                         # 重置退出标记
                         exit_requested = False
@@ -1259,7 +1277,7 @@ class TalkerThinkerApp:
                             print(f"\n[Talker] 开始处理队列任务：{next_task.name}...")
                             # 异步启动新任务（不等待完成）
                             task = asyncio.create_task(self._process_as_task(
-                                next_task.user_input, session_id, time.time()
+                                next_task.user_input, session_id, time.time(), output_event=output_complete_event
                             ))
                             # Add error handling for the background task
                             task.add_done_callback(lambda t: self._handle_background_task_error(t))
