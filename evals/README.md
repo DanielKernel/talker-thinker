@@ -38,7 +38,9 @@ evals/
 │   ├── simple.py            # 简单任务 (S001-S006)
 │   ├── medium.py            # 中等任务 (M001-M006)
 │   ├── complex.py           # 复杂任务 (C001-C006)
-│   └── edge.py              # 边界/异常 (E001-E008)
+│   ├── edge.py              # 边界/异常 (E001-E008)
+│   ├── conversation.py      # 对话场景 (CX001-CX018) [新增]
+│   └── ux_quality.py        # 用户体验质量 (UQ001-UQ015) [新增]
 ├── metrics/                 # 评测指标
 │   ├── __init__.py
 │   ├── latency.py           # 时延指标
@@ -67,7 +69,7 @@ evals/
 # 激活虚拟环境
 source .venv/bin/activate
 
-# 运行全部评测
+# 运行全部评测 (59 个用例)
 python -m evals run
 
 # 运行评测并生成报告
@@ -76,6 +78,8 @@ python -m evals run -v --output result.json --html
 # 运行特定类别的评测
 python -m evals run --category simple
 python -m evals run --category complex
+python -m evals run --category conversation   # 对话场景
+python -m evals run --category ux_quality     # 用户体验质量
 ```
 
 ### 列出评测用例
@@ -106,7 +110,7 @@ python -m evals report --input result.json --format console
 python -m evals run [选项]
 
 选项:
-  --category, -c     运行特定类别 (simple/medium/complex/edge)
+  --category, -c     运行特定类别 (simple/medium/complex/edge/conversation/ux_quality)
   --output, -o       输出 JSON 文件路径
   --html, -H         生成 HTML 报告
   --verbose, -v      显示详细输出
@@ -121,7 +125,7 @@ python -m evals run [选项]
 python -m evals list [选项]
 
 选项:
-  --category, -c     列出特定类别的用例
+  --category, -c     列出特定类别的用例 (simple/medium/complex/edge/conversation/ux_quality)
 ```
 
 ### `report` - 生成报告
@@ -205,6 +209,24 @@ class Assertion:
 - 重复问题
 - 敏感话题
 - 指令注入尝试
+
+#### 对话场景 (Conversation, CX001-CX018) [新增]
+- **多轮对话连贯性**: 代词指代、话题延续、任务分解
+- **上下文理解**: 实体回忆、意图推断
+- **情感智能**: 情绪识别、积极回应、挫折安抚
+- **个性化**: 偏好记忆、身份认知
+- **任务完成度**: 多步跟踪、中断恢复
+- **交互自然度**: 开场、结束、追问处理
+- **特殊场景**: 模糊请求、敏感话题、知识边界
+
+#### 用户体验质量 (UX Quality, UQ001-UQ015) [新增]
+- **回答准确性**: 事实、计算、时效性
+- **信息完整性**: 多部分问题、背景信息
+- **表达清晰度**: 结构化、简洁性
+- **有用性**: 可操作性建议、问题解决导向
+- **安全性**: 危险拒绝、隐私保护
+- **专业度**: 领域回答、不确定性表达、知识边界诚实
+- **综合质量**: 综合回答质量评估
 
 ## 评测报告
 

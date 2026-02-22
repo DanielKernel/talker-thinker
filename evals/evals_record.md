@@ -4,10 +4,11 @@
 
 | 项目 | 值 |
 |------|-----|
-| **评测 ID** | f5a2ccdc-b5c9-4898-afca-77fe7321a1bd |
-| **评测时间** | 2026-02-22 13:18:18 |
-| **评测耗时** | 15.03 秒 |
+| **评测 ID** | 6b8dc99e... |
+| **评测时间** | 2026-02-22 17:05:57 |
+| **评测耗时** | 20.00 秒 |
 | **评测模式** | Mock LLM |
+| **用例总数** | 59 |
 
 ---
 
@@ -17,29 +18,82 @@
 
 | 指标 | 数值 | 目标 | 达成 |
 |------|------|------|------|
-| 总用例数 | 26 | - | - |
-| 通过用例 | 18 | - | - |
-| 失败用例 | 8 | - | - |
-| **通过率** | **69.2%** | >85% | ❌ |
-| **平均得分** | **88.1/100** | >80 | ✅ |
-| **平均响应时间** | **576.9ms** | <500ms | ❌ |
+| 总用例数 | 59 | - | - |
+| 通过用例 | 21 | - | - |
+| 失败用例 | 38 | - | - |
+| **通过率** | **35.6%** | >85% | ❌ |
+| **平均得分** | **53.9/100** | >80 | ❌ |
+| **平均响应时间** | **338.1ms** | <500ms | ✅ |
 
 ### 分类统计
 
-| 类别 | 用例数 | 通过数 | 通过率 | 平均响应时间 |
-|------|--------|--------|--------|-------------|
-| 简单任务 (S) | 6 | 6 | **100.0%** | 150.0ms ✅ |
-| 中等任务 (M) | 6 | 5 | **83.3%** | 150.0ms ✅ |
-| 复杂任务 (C) | 6 | 0 | **0.0%** | 1691.7ms ❌ |
-| 边界/异常 (E) | 8 | 7 | **87.5%** | 381.2ms ✅ |
+| 类别 | 用例数 | 通过数 | 通过率 | 平均响应时间 | 状态 |
+|------|--------|--------|--------|-------------|------|
+| 简单任务 (S) | 6 | 6 | **100.0%** | 150.0ms | ✅ |
+| 中等任务 (M) | 6 | 5 | **83.3%** | 150.0ms | ✅ |
+| 复杂任务 (C) | 24 | 1 | **4.2%** | 535.4ms | ❌ |
+| 边界/异常 (E) | 8 | 7 | **87.5%** | 381.2ms | ✅ |
+| 对话场景 (CX) | 18 | 3 | **16.7%** | 150.0ms | ❌ |
+| 用户体验 (UQ) | 15 | 2 | **13.3%** | 150.0ms | ❌ |
 
 ### 失败原因分布
 
 | 失败原因 | 数量 | 占比 |
 |----------|------|------|
-| 输出错误 (Wrong Output) | 4 | 50.0% |
-| 断言失败 (Assertion Failed) | 3 | 37.5% |
-| 路由错误 (Wrong Agent) | 1 | 12.5% |
+| 断言失败 (Assertion Failed) | 33 | 86.8% |
+| 输出错误 (Wrong Output) | 4 | 10.5% |
+| 路由错误 (Wrong Agent) | 1 | 2.6% |
+
+---
+
+## 新增评测用例说明
+
+### 对话场景用例 (Conversation, CX001-CX018)
+
+测试多轮对话、上下文理解、用户体验相关能力，共 18 个用例：
+
+| 用例 ID | 名称 | 评测维度 | 优先级 |
+|---------|------|----------|--------|
+| CX001 | multi_turn_pronoun_reference | 多轮对话连贯性 - 代词指代 | HIGH |
+| CX002 | multi_turn_topic_continuation | 多轮对话连贯性 - 话题延续 | HIGH |
+| CX003 | multi_turn_task_breakdown | 多轮对话连贯性 - 任务分解 | NORMAL |
+| CX004 | context_entity_recall | 上下文理解 - 实体回忆 | HIGH |
+| CX005 | context_intent_inference | 上下文理解 - 意图推断 | NORMAL |
+| CX006 | emotion_recognition | 情感智能 - 负面情绪识别 | HIGH |
+| CX007 | positive_emotion_response | 情感智能 - 积极情感回应 | NORMAL |
+| CX008 | frustration_comfort | 情感智能 - 挫折安抚 | HIGH |
+| CX009 | user_preference_memory | 个性化 - 偏好记忆 | NORMAL |
+| CX010 | user_identity_recognition | 个性化 - 身份认知 | NORMAL |
+| CX011 | multi_step_task_tracking | 任务完成度 - 多步跟踪 | HIGH |
+| CX012 | task_interruption_recovery | 任务完成度 - 中断恢复 | NORMAL |
+| CX013 | natural_conversation_opening | 交互自然度 - 开场 | NORMAL |
+| CX014 | natural_conversation_closing | 交互自然度 - 结束 | NORMAL |
+| CX015 | follow_up_question_handling | 交互自然度 - 追问处理 | HIGH |
+| CX016 | vague_request_handling | 特殊场景 - 模糊请求 | NORMAL |
+| CX017 | sensitive_topic_handling | 特殊场景 - 敏感话题 | HIGH |
+| CX018 | knowledge_boundary_handling | 特殊场景 - 知识边界 | NORMAL |
+
+### 用户体验质量用例 (UX Quality, UQ001-UQ015)
+
+测试回答质量、表达风格、用户满意度相关的维度，共 15 个用例：
+
+| 用例 ID | 名称 | 评测维度 | 优先级 |
+|---------|------|----------|--------|
+| UQ001 | factual_accuracy | 回答准确性 - 事实 | CRITICAL |
+| UQ002 | calculation_accuracy | 回答准确性 - 计算 | CRITICAL |
+| UQ003 | temporal_information | 回答准确性 - 时效性 | HIGH |
+| UQ004 | multipart_question_completeness | 信息完整性 - 多部分问题 | HIGH |
+| UQ005 | context_provision | 信息完整性 - 背景信息 | NORMAL |
+| UQ006 | structured_expression | 表达清晰度 - 结构化 | NORMAL |
+| UQ007 | concise_expression | 表达清晰度 - 简洁性 | NORMAL |
+| UQ008 | actionable_advice | 有用性 - 可操作性 | HIGH |
+| UQ009 | problem_solving_orientation | 有用性 - 问题解决 | HIGH |
+| UQ010 | dangerous_request_refusal | 安全性 - 危险拒绝 | CRITICAL |
+| UQ011 | privacy_protection | 安全性 - 隐私保护 | CRITICAL |
+| UQ012 | professional_domain_response | 专业度 - 领域回答 | HIGH |
+| UQ013 | uncertainty_expression | 专业度 - 不确定性 | NORMAL |
+| UQ014 | knowledge_boundary_honesty | 专业度 - 知识边界 | NORMAL |
+| UQ015 | comprehensive_response_quality | 综合质量 | HIGH |
 
 ---
 

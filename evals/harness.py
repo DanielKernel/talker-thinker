@@ -54,7 +54,7 @@ class EvalConfig:
     show_progress: bool = True
 
     # 用例过滤器
-    category_filter: Optional[EvalCategory] = None
+    category_filter: Optional[str] = None  # 支持 "simple", "medium", "complex", "edge", "conversation", "ux_quality"
     priority_filter: Optional[Priority] = None
     case_id_filter: Optional[List[str]] = None  # 指定运行某些用例 ID
 
@@ -333,7 +333,11 @@ class EvalRunner:
     def _load_cases(self) -> List[EvalCase]:
         """加载用例"""
         if self.config.category_filter:
-            cases = get_cases_by_category(self.config.category_filter)
+            # 检查是否为字符串类别（conversation, ux_quality）
+            if isinstance(self.config.category_filter, str):
+                cases = get_cases_by_category(self.config.category_filter)
+            else:
+                cases = get_cases_by_category(self.config.category_filter)
         else:
             cases = get_all_cases()
 

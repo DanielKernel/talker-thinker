@@ -32,12 +32,17 @@ def cmd_run(args):
     )
 
     if args.category:
-        try:
-            config.category_filter = EvalCategory(args.category)
-        except ValueError:
-            print(f"❌ 无效的类别：{args.category}")
-            print("有效类别：simple, medium, complex, edge")
-            sys.exit(1)
+        # 支持字符串类别（conversation, ux_quality）
+        if args.category in ["conversation", "ux_quality"]:
+            # 对于新类别，使用自定义过滤
+            config.category_filter = None  # 在 runner 中处理
+        else:
+            try:
+                config.category_filter = EvalCategory(args.category)
+            except ValueError:
+                print(f"❌ 无效的类别：{args.category}")
+                print("有效类别：simple, medium, complex, edge, conversation, ux_quality")
+                sys.exit(1)
 
     if args.timeout:
         config.case_timeout_seconds = args.timeout
@@ -92,13 +97,17 @@ def cmd_run(args):
 def cmd_list(args):
     """列出评测用例"""
     if args.category:
-        try:
-            category = EvalCategory(args.category)
-            cases = get_cases_by_category(category)
-        except ValueError:
-            print(f"❌ 无效的类别：{args.category}")
-            print("有效类别：simple, medium, complex, edge")
-            sys.exit(1)
+        # 支持字符串类别（conversation, ux_quality）
+        if args.category in ["conversation", "ux_quality"]:
+            cases = get_cases_by_category(args.category)
+        else:
+            try:
+                category = EvalCategory(args.category)
+                cases = get_cases_by_category(category)
+            except ValueError:
+                print(f"❌ 无效的类别：{args.category}")
+                print("有效类别：simple, medium, complex, edge, conversation, ux_quality")
+                sys.exit(1)
     else:
         cases = get_all_cases()
 
@@ -221,13 +230,15 @@ def cmd_report(args):
         sys.exit(1)
 
 
-def category_name(category: EvalCategory) -> str:
+def category_name(category: str) -> str:
     """获取类别中文名"""
     names = {
-        EvalCategory.SIMPLE: "简单任务",
-        EvalCategory.MEDIUM: "中等任务",
-        EvalCategory.COMPLEX: "复杂任务",
-        EvalCategory.EDGE: "边界/异常",
+        "simple": "简单任务",
+        "medium": "中等任务",
+        "complex": "复杂任务",
+        "edge": "边界/异常",
+        "conversation": "对话场景",
+        "ux_quality": "用户体验质量",
     }
     return names.get(category, str(category))
 
@@ -253,7 +264,7 @@ def main():
     run_parser = subparsers.add_parser("run", help="运行评测")
     run_parser.add_argument(
         "--category", "-c",
-        choices=["simple", "medium", "complex", "edge"],
+        choices=["simple", "medium", "complex", "edge", "conversation", "ux_quality"],
         help="运行特定类别的评测",
     )
     run_parser.add_argument(
@@ -293,7 +304,7 @@ def main():
     list_parser = subparsers.add_parser("list", help="列出评测用例")
     list_parser.add_argument(
         "--category", "-c",
-        choices=["simple", "medium", "complex", "edge"],
+        choices=["simple", "medium", "complex", "edge", "conversation", "ux_quality"],
         help="列出特定类别的评测用例",
     )
     list_parser.set_defaults(func=cmd_list)
