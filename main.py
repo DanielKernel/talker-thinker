@@ -1065,7 +1065,11 @@ class TalkerThinkerApp:
                     process_task = await self._process_as_task(
                         user_input, session_id, input_time
                     )
+                    # 任务启动后，立即设置事件允许用户输入（支持全双工交互）
+                    output_complete_event.set()
+
                     pending_new_input: Optional[str] = None
+                    exit_requested = False  # 标记是否请求退出
 
                     try:
                         # 等待任务完成，同时监听新输入
@@ -1084,6 +1088,10 @@ class TalkerThinkerApp:
 
                                     # 2. 先显示 Talker 响应（如果有）
                                     if handled:
+                                        if response == "__EXIT__":
+                                            # 用户请求退出，设置标记
+                                            exit_requested = True
+                                            break  # 退出等待循环
                                         if response:
                                             print(response)
                                         # 显示响应后，设置事件允许显示下一个输入提示
@@ -1105,6 +1113,11 @@ class TalkerThinkerApp:
                         if not output_complete_event.is_set():
                             output_complete_event.set()
 
+                    # 检测退出请求
+                    if exit_requested:
+                        print("\n再见!")
+                        break
+
                     # 如果任务完成，清理状态
                     if process_task.done():
                         self.task_manager.end_task()
@@ -1119,14 +1132,60 @@ class TalkerThinkerApp:
                             process_task = await self._process_as_task(
                                 user_input, session_id, input_time
                             )
+                            # 重置退出标记
+                            exit_requested = False
+                            pending_new_input = None
+
                             try:
-                                await process_task
-                            except asyncio.CancelledError:
+                                # 等待任务完成，同时监听新输入
+                                while not process_task.done():
+                                    try:
+                                        new_input = await asyncio.wait_for(
+                                            input_queue.get(),
+                                            timeout=0.2
+                                        )
+                                        # 有新输入，处理打断逻辑
+                                        if new_input.strip():
+                                            handled, response = await self._handle_new_input_during_processing(
+                                                new_input, session_id
+                                            )
+
+                                            if handled:
+                                                if response == "__EXIT__":
+                                                    exit_requested = True
+                                                    break
+                                                if response:
+                                                    print(response)
+                                                output_complete_event.set()
+                                            else:
+                                                pending_new_input = (
+                                                    self.task_manager.pending_replacement_input
+                                                    or new_input.strip()
+                                                )
+                                                self.task_manager.set_pending_replacement_input(None)
+                                                input_time = time.time()
+                                                break
+
+                                    except asyncio.TimeoutError:
+                                        continue
+                                    finally:
+                                        if not output_complete_event.is_set():
+                                            output_complete_event.set()
+
+                                    # 检测退出请求
+                                    if exit_requested:
+                                        break
+
+                                if exit_requested:
+                                    print("\n再见!")
+                                    break
+
+                            except Exception:
                                 pass
-                            self.task_manager.end_task()
-                            print()
-                            # 新任务完成后，设置事件允许显示下一个输入提示
-                            output_complete_event.set()
+                            finally:
+                                self.task_manager.end_task()
+                                print()
+                                output_complete_event.set()
                     else:
                         # 被打断，处理新任务
                         self.task_manager._cancelled = False
@@ -1134,15 +1193,62 @@ class TalkerThinkerApp:
                         process_task = await self._process_as_task(
                             user_input, session_id, input_time
                         )
+                        # 重置退出标记
+                        exit_requested = False
+                        pending_new_input = None
+
                         # 继续等待新任务完成
                         try:
-                            await process_task
-                        except asyncio.CancelledError:
+                            # 等待任务完成，同时监听新输入
+                            while not process_task.done():
+                                try:
+                                    new_input = await asyncio.wait_for(
+                                        input_queue.get(),
+                                        timeout=0.2
+                                    )
+                                    # 有新输入，处理打断逻辑
+                                    if new_input.strip():
+                                        handled, response = await self._handle_new_input_during_processing(
+                                            new_input, session_id
+                                        )
+
+                                        if handled:
+                                            if response == "__EXIT__":
+                                                exit_requested = True
+                                                break
+                                            if response:
+                                                print(response)
+                                            output_complete_event.set()
+                                        else:
+                                            pending_new_input = (
+                                                self.task_manager.pending_replacement_input
+                                                or new_input.strip()
+                                            )
+                                            self.task_manager.set_pending_replacement_input(None)
+                                            input_time = time.time()
+                                            break
+
+                                except asyncio.TimeoutError:
+                                    continue
+                                finally:
+                                    if not output_complete_event.is_set():
+                                        output_complete_event.set()
+
+                                # 检测退出请求
+                                if exit_requested:
+                                    break
+
+                            if exit_requested:
+                                print("\n再见!")
+                                break
+
+                        except Exception:
                             pass
-                        self.task_manager.end_task()
-                        print()
-                        # 新任务完成后，设置事件允许显示下一个输入提示
-                        output_complete_event.set()
+                        finally:
+                            self.task_manager.end_task()
+                            print()
+                            # 新任务完成后，设置事件允许显示下一个输入提示
+                            output_complete_event.set()
 
                         # 检查是否有队列中的任务需要处理
                         next_task = self.task_manager.task_queue.start_next()

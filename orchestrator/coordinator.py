@@ -26,6 +26,9 @@ from skills.examples import (
     CalculatorSkill,
     UnitConverterSkill,
 )
+from monitoring.logging import get_logger
+
+logger = get_logger("orchestrator.coordinator")
 
 
 class ThinkerStage(Enum):
