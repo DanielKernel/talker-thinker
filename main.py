@@ -172,7 +172,7 @@ class TaskManager:
             self._current_task.cancel()
             try:
                 # 添加取消超时保护
-                await asyncio.wait_for(self._current_task, timeout=5.0)
+                await asyncio.wait_for(asyncio.shield(self._current_task), timeout=5.0)
             except asyncio.CancelledError:
                 pass
             except asyncio.TimeoutError:
@@ -967,7 +967,7 @@ class TalkerThinkerApp:
                         if wait_start_time == 0:
                             wait_start_time = time.time()
                         elif time.time() - wait_start_time > 5.0:
-                            logger.warning("output_complete_event timeout, forcing continue")
+                            logger.debug("output_complete_event timeout, forcing continue")
                             wait_start_time = 0  # 重置
                             break
                         await asyncio.sleep(0.1)

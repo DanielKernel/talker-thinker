@@ -1107,6 +1107,10 @@ class Orchestrator:
         loop_iteration_count = 0
         max_loop_iterations = 10000  # 最大循环次数
 
+        # 循环启动时间（用于第三个超时条件）
+        loop_start_time = time.time()
+        max_loop_total_time = 180.0  # 循环最大运行时间（3 分钟）
+
 
         # 处理Talker输出
         first_token_time = None
@@ -1139,6 +1143,12 @@ class Orchestrator:
             # 超时保护
             if elapsed > TALKER_TIMEOUT:
                 logger.warning(f"Talker task timeout ({TALKER_TIMEOUT}s), cancelling...")
+                talker_task.cancel()
+                break
+
+            # 超时保护 2: 循环运行时间过长
+            if current_time - loop_start_time > max_loop_total_time:
+                logger.warning(f"Talker loop running time exceeded {max_loop_total_time}s, breaking...")
                 talker_task.cancel()
                 break
 
@@ -1436,10 +1446,14 @@ class Orchestrator:
         # 添加超时保护变量
         last_output_time = thinker_start
         max_wait_time = 30.0  # 最大等待时间（秒）
-        
+
         # 循环保护：防止无限循环
         loop_iteration_count = 0
         max_loop_iterations = 10000  # 最大循环次数
+
+        # 循环启动时间（用于第三个超时条件）
+        loop_start_time = time.time()
+        max_loop_total_time = 600.0  # 循环最大运行时间（10 分钟）
 
         while not thinker_complete or output_index < len(thinker_output):
             loop_iteration_count += 1
@@ -1451,16 +1465,22 @@ class Orchestrator:
 
             current_time = time.time()
             elapsed = current_time - thinker_start
-            
+
             # 超时保护 1: 整体任务超时
             if elapsed > THINKER_TIMEOUT:
                 logger.warning(f"Thinker task timeout ({THINKER_TIMEOUT}s), cancelling...")
                 thinker_task.cancel()
                 break
-            
+
             # 超时保护 2: Thinker 已完成但输出处理卡住
             if thinker_complete and current_time - last_output_time > max_wait_time:
                 logger.warning(f"Thinker output processing timeout ({max_wait_time}s), breaking loop...")
+                break
+
+            # 超时保护 3: 循环运行时间过长（防止 thinker_complete 永远不被设置）
+            if current_time - loop_start_time > max_loop_total_time:
+                logger.warning(f"Loop running time exceeded {max_loop_total_time}s, breaking...")
+                thinker_task.cancel()
                 break
 
             # === 播报检查 ===
