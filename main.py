@@ -944,9 +944,16 @@ class TalkerThinkerApp:
         output_complete_event = asyncio.Event()
         output_complete_event.set()  # 初始状态为已设置，允许显示输入提示
 
-        # 将输出事件传递给输入处理器
+        # 输入请求事件：只有当系统准备好接受输入时才设置
+        # 这确保输入提示符不会在任务输出过程中显示
+        input_request_event = asyncio.Event()
+        input_request_event.set()  # 初始状态为已设置，允许显示输入提示
+
+        # 将两个事件传递给输入处理器
         if hasattr(input_handler, 'set_output_event'):
             input_handler.set_output_event(output_complete_event)
+        if hasattr(input_handler, 'set_input_request_event'):
+            input_handler.set_input_request_event(input_request_event)
 
         # 创建关闭事件
         shutdown_event = asyncio.Event()
@@ -972,11 +979,16 @@ class TalkerThinkerApp:
                         logger.info("Shutdown signal detected, exiting...")
                         break
 
+                    # 等待系统请求输入
+                    # 这确保输入提示符只在系统准备好时才显示
+                    await input_request_event.wait()
+                    input_request_event.clear()
+
                     # 使用 prompt_toolkit 获取输入（支持中文编辑）
                     # 注意：get_input 内部会等待 output_complete_event 被设置后才显示提示符
                     line = await loop.run_in_executor(None, input_handler.get_input, session_id)
 
-                    # 获取到输入后，立即清除事件
+                    # 获取到输入后，立即清除输出事件
                     # 这样下次 get_input 调用时会等待输出完成后再显示提示符
                     output_complete_event.clear()
 
@@ -1048,8 +1060,8 @@ class TalkerThinkerApp:
                             # 任务已处理（如查询状态），显示响应
                             if response:
                                 print(response)
-                            # 显示响应后，设置事件允许显示下一个输入提示
-                            output_complete_event.set()
+                            # 显示响应后，设置输入请求事件，允许显示下一个输入提示
+                            input_request_event.set()
                             continue
                         # 否则，继续处理新输入
 
@@ -1096,8 +1108,8 @@ class TalkerThinkerApp:
                                             break  # 退出等待循环
                                         if response:
                                             print(response)
-                                        # 显示响应后，设置事件允许显示下一个输入提示
-                                        output_complete_event.set()
+                                        # 显示响应后，设置输入请求事件，允许显示下一个输入提示
+                                        input_request_event.set()
                                     else:
                                         # 需要处理新任务，保持事件清除状态
                                         pending_new_input = (
@@ -1112,8 +1124,8 @@ class TalkerThinkerApp:
                                 continue
                     finally:
                         # 确保事件总是被设置（防止任务异常退出时卡死）
-                        if not output_complete_event.is_set():
-                            output_complete_event.set()
+                        if not input_request_event.is_set():
+                            input_request_event.set()
 
                     # 检测退出请求
                     if exit_requested:
@@ -1125,8 +1137,8 @@ class TalkerThinkerApp:
                         self.task_manager.end_task()
                         print()  # 换行
 
-                        # 任务完成，设置输出完成事件，允许显示输入提示
-                        output_complete_event.set()
+                        # 任务完成，设置输入请求事件，允许显示输入提示
+                        input_request_event.set()
 
                         if pending_new_input:
                             user_input = pending_new_input
@@ -1158,7 +1170,8 @@ class TalkerThinkerApp:
                                                     break
                                                 if response:
                                                     print(response)
-                                                output_complete_event.set()
+                                                # 显示响应后，设置输入请求事件，允许显示下一个输入提示
+                                                input_request_event.set()
                                             else:
                                                 pending_new_input = (
                                                     self.task_manager.pending_replacement_input
@@ -1171,8 +1184,8 @@ class TalkerThinkerApp:
                                     except asyncio.TimeoutError:
                                         continue
                                     finally:
-                                        if not output_complete_event.is_set():
-                                            output_complete_event.set()
+                                        if not input_request_event.is_set():
+                                            input_request_event.set()
 
                                     # 检测退出请求
                                     if exit_requested:
@@ -1187,7 +1200,8 @@ class TalkerThinkerApp:
                             finally:
                                 self.task_manager.end_task()
                                 print()
-                                output_complete_event.set()
+                                # 新任务完成后，设置输入请求事件，允许显示下一个输入提示
+                                input_request_event.set()
                     else:
                         # 被打断，处理新任务
                         self.task_manager._cancelled = False
@@ -1220,7 +1234,8 @@ class TalkerThinkerApp:
                                                 break
                                             if response:
                                                 print(response)
-                                            output_complete_event.set()
+                                            # 显示响应后，设置输入请求事件，允许显示下一个输入提示
+                                            input_request_event.set()
                                         else:
                                             pending_new_input = (
                                                 self.task_manager.pending_replacement_input
@@ -1233,8 +1248,8 @@ class TalkerThinkerApp:
                                 except asyncio.TimeoutError:
                                     continue
                                 finally:
-                                    if not output_complete_event.is_set():
-                                        output_complete_event.set()
+                                    if not input_request_event.is_set():
+                                        input_request_event.set()
 
                                 # 检测退出请求
                                 if exit_requested:
@@ -1249,8 +1264,8 @@ class TalkerThinkerApp:
                         finally:
                             self.task_manager.end_task()
                             print()
-                            # 新任务完成后，设置事件允许显示下一个输入提示
-                            output_complete_event.set()
+                            # 新任务完成后，设置输入请求事件，允许显示下一个输入提示
+                            input_request_event.set()
 
                         # 检查是否有队列中的任务需要处理
                         next_task = self.task_manager.task_queue.start_next()

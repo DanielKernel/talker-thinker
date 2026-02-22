@@ -197,34 +197,46 @@ class TestOutputCompleteEvent:
 
     Bug 描述：在任务处理过程中，output_complete_event 被清除后没有及时设置，
               导致 read_input 函数无限等待，用户无法输入
-    修复方式：任务启动后立即设置 output_complete_event
+    修复方式：
+    1. 使用双事件机制：output_complete_event 和 input_request_event
+    2. input_request_event 控制何时系统准备好接受输入
+    3. output_complete_event 控制何时输出完成，可以显示输入提示
 
     这是导致"Talker 不响应"和"无法退出"的根本原因之一
     """
 
-    def test_output_event_set_after_task_start(self):
-        """测试任务启动后 output_complete_event 被设置"""
+    def test_input_request_event_exists(self):
+        """测试使用双事件机制"""
         import inspect
         from main import TalkerThinkerApp
 
         source = inspect.getsource(TalkerThinkerApp.run_interactive)
-        # 检查在 process_task 创建后是否有 output_complete_event.set()
-        assert 'output_complete_event.set()' in source, \
-            "run_interactive 中必须设置 output_complete_event"
+        # 检查是否有 input_request_event
+        assert 'input_request_event' in source, \
+            "run_interactive 中必须使用 input_request_event"
+        assert 'input_request_event = asyncio.Event()' in source, \
+            "必须创建 input_request_event"
 
-        # 检查设置位置是否在任务创建之后
+    def test_input_request_event_set_on_task_complete(self):
+        """测试任务完成后 input_request_event 被设置"""
+        import inspect
+        from main import TalkerThinkerApp
+
+        source = inspect.getsource(TalkerThinkerApp.run_interactive)
+        # 检查在 process_task.done() 后是否有 input_request_event.set()
         lines = source.split('\n')
-        found_task_creation = False
+        found_task_done_check = False
         found_event_set_after = False
+
         for line in lines:
-            if 'process_task = await self._process_as_task' in line:
-                found_task_creation = True
-            if found_task_creation and 'output_complete_event.set()' in line:
+            if 'process_task.done()' in line:
+                found_task_done_check = True
+            if found_task_done_check and 'input_request_event.set()' in line:
                 found_event_set_after = True
                 break
 
         assert found_event_set_after, \
-            "output_complete_event.set() 必须在任务创建之后调用"
+            "input_request_event.set() 必须在任务完成后调用"
 
 
 class TestInfiniteLoop:
@@ -294,6 +306,7 @@ class TestReadInputTimeout:
     修复方案：
     1. 添加 5 秒超时保护
     2. 移除超时后的 continue 检查，确保输入可以继续获取
+    3. 超时保护逻辑已移至 tui/input.py 中的 TalkerInput.get_input 方法
 
     这是导致"无法输入"的根本原因之一
     """
@@ -301,52 +314,42 @@ class TestReadInputTimeout:
     def test_read_input_timeout_protection(self):
         """测试 read_input 有超时保护"""
         import inspect
-        from main import TalkerThinkerApp
+        from tui.input import TalkerInput
 
-        source = inspect.getsource(TalkerThinkerApp.run_interactive)
-        # 查找 read_input 函数中的超时保护
-        assert 'wait_start_time' in source, \
-            "read_input 必须有 wait_start_time 追踪变量"
+        source = inspect.getsource(TalkerInput.get_input)
+        # 查找 get_input 函数中的超时保护
+        assert 'wait_start = time.time()' in source or 'wait_start_time' in source, \
+            "get_input 必须有 wait_start 追踪变量"
         assert '5.0' in source or '5 ' in source, \
-            "read_input 必须有 5 秒超时保护"
+            "get_input 必须有 5 秒超时保护"
 
     def test_read_input_no_continue_after_timeout(self):
         """测试 read_input 在超时后没有 continue 检查，确保输入可以继续获取"""
         import inspect
-        from main import TalkerThinkerApp
+        from tui.input import TalkerInput
 
-        source = inspect.getsource(TalkerThinkerApp.run_interactive)
+        source = inspect.getsource(TalkerInput.get_input)
 
-        # 检查 read_input 函数中不应该有超时后的 continue 检查
-        # 查找 pattern: "if not output_complete_event.is_set():\n                        continue"
-        # 这个 pattern 在 timeout 之后不应该存在
-
+        # 检查 get_input 函数中不应该有强制 continue 的逻辑
+        # 超时后应该继续显示输入提示，而不是跳过
         lines = source.split('\n')
-        in_read_input = False
         found_timeout_check = False
         found_continue_after_timeout = False
 
         for i, line in enumerate(lines):
-            if 'async def read_input' in line:
-                in_read_input = True
-            if in_read_input and 'forcing continue' in line:
+            if 'time.time() - wait_start > 5.0' in line or "time.time() - wait_start > 5" in line:
                 found_timeout_check = True
-                # 检查接下来几行是否有 continue
+                # 检查接下来几行是否有 continue（不应该有）
                 for j in range(i+1, min(i+10, len(lines))):
-                    if 'if not output_complete_event.is_set()' in lines[j]:
-                        # 找到检查，再检查后面是否有 continue
-                        for k in range(j+1, min(j+5, len(lines))):
-                            if 'continue' in lines[k] and lines[k].strip().startswith('continue'):
-                                found_continue_after_timeout = True
-                                break
+                    if 'break' in lines[j]:
+                        # 找到 break，这是正确的行为
+                        break
+                    if lines[j].strip().startswith('continue'):
+                        found_continue_after_timeout = True
                         break
 
-            # 找到下一个函数定义，结束检查
-            if in_read_input and (line.strip().startswith('async def ') or line.strip().startswith('def ')) and 'read_input' not in line:
-                break
-
         assert not found_continue_after_timeout, \
-            "read_input 在超时后不应该有 continue 检查，这会导致死锁"
+            "get_input 在超时后不应该有 continue，应该继续显示输入提示"
 
 
 class TestSignalHandling:

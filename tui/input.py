@@ -79,6 +79,9 @@ class TalkerInput:
         # Output event for synchronizing input prompt display
         self._output_event: Optional[asyncio.Event] = None
 
+        # Input request event for controlling when input is requested
+        self._input_request_event: Optional[asyncio.Event] = None
+
     def set_output_event(self, event: asyncio.Event) -> None:
         """
         Set the output event for synchronizing input prompt display
@@ -87,6 +90,15 @@ class TalkerInput:
             event: asyncio.Event that is set when output is complete
         """
         self._output_event = event
+
+    def set_input_request_event(self, event: asyncio.Event) -> None:
+        """
+        Set the input request event for controlling when input prompt should be shown
+
+        Args:
+            event: asyncio.Event that is set when system is ready to accept input
+        """
+        self._input_request_event = event
 
     def get_input(self, session_id: str = None) -> str:
         """
@@ -106,6 +118,17 @@ class TalkerInput:
         ms = int((now % 1) * 1000)
         timestamp_formatted = f"{timestamp}.{ms:03d}"
 
+        # Wait for input request event before showing input prompt
+        # This ensures the input prompt only appears when the system is ready
+        if self._input_request_event:
+            wait_start = time.time()
+            while not self._input_request_event.is_set():
+                # Timeout after 5 seconds to prevent infinite wait
+                if time.time() - wait_start > 5.0:
+                    logger.debug("Input request event timeout, showing input prompt anyway")
+                    break
+                time.sleep(0.05)
+
         # Wait for output to complete before showing input prompt
         # This prevents the input prompt from appearing during Talker output
         if self._output_event:
@@ -116,8 +139,6 @@ class TalkerInput:
                     logger.debug("Output event timeout, showing input prompt anyway")
                     break
                 time.sleep(0.05)
-            # Clear the event for next round
-            # Note: The event will be set again when the next output starts
 
         try:
             user_input = prompt(
@@ -167,6 +188,10 @@ class FallbackInput:
         """Set the output event for synchronizing input prompt display"""
         self._output_event = event
 
+    def set_input_request_event(self, event: asyncio.Event) -> None:
+        """Set the input request event for controlling when input prompt should be shown"""
+        self._input_request_event = event
+
     def get_input(self, session_id: str = None) -> str:
         """Get user input using native input()"""
         import time
@@ -176,6 +201,14 @@ class FallbackInput:
         except RuntimeError:
             loop = asyncio.new_event_loop()
             asyncio.set_event_loop(loop)
+
+        # Wait for input request event before showing input prompt
+        if hasattr(self, '_input_request_event') and self._input_request_event:
+            wait_start = time.time()
+            while not self._input_request_event.is_set():
+                if time.time() - wait_start > 5.0:
+                    break
+                time.sleep(0.05)
 
         # Wait for output to complete before showing input prompt
         if hasattr(self, '_output_event') and self._output_event:

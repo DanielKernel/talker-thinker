@@ -29,13 +29,13 @@ class TestBroadcastOptimization:
         topic = orchestrator._extract_topic("想喝一杯咖啡，有什么推荐")
         assert topic == "咖啡"
 
-        # 打车话题（注意：话题库中"打车"在"选车"之前）
+        # 打车话题
         topic = orchestrator._extract_topic("帮我叫个车")
-        assert topic in ["打车", "选车"]
+        assert topic == "打车"
 
-        # 选车话题 - "SUV 车"会匹配到"选车"话题
+        # 选车话题
         topic = orchestrator._extract_topic("我想买一辆 SUV 车，有什么推荐")
-        assert topic in ["车", "选车"]
+        assert topic == "选车"
 
     def test_stage_broadcast_includes_topic(self, orchestrator):
         """测试播报包含话题关键词"""
