@@ -1100,6 +1100,10 @@ class Orchestrator:
         # 启动Talker任务
         talker_task = asyncio.create_task(run_talker())
         TALKER_TIMEOUT = 120.0  # 120 秒超时
+        # 循环保护：防止无限循环
+        loop_iteration_count = 0
+        max_loop_iterations = 10000  # 最大循环次数
+
 
         # 处理Talker输出
         first_token_time = None
@@ -1118,6 +1122,13 @@ class Orchestrator:
                 return 8.0  # 后期8秒
 
         while not talker_complete or not talker_queue.empty():
+            loop_iteration_count += 1
+
+            # 循环次数保护
+            if loop_iteration_count > max_loop_iterations:
+                logger.warning(f"Talker loop exceeded {max_loop_iterations} iterations, breaking")
+                break
+
             current_time = time.time()
             elapsed = current_time - llm_request_time
             
@@ -1423,7 +1434,18 @@ class Orchestrator:
         last_output_time = thinker_start
         max_wait_time = 30.0  # 最大等待时间（秒）
         
+        # 循环保护：防止无限循环
+        loop_iteration_count = 0
+        max_loop_iterations = 10000  # 最大循环次数
+
         while not thinker_complete or output_index < len(thinker_output):
+            loop_iteration_count += 1
+
+            # 循环次数保护
+            if loop_iteration_count > max_loop_iterations:
+                logger.warning(f"Loop exceeded {max_loop_iterations} iterations, breaking")
+                break
+
             current_time = time.time()
             elapsed = current_time - thinker_start
             

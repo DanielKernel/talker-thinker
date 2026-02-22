@@ -5,6 +5,7 @@ import argparse
 import asyncio
 import json
 import re
+import signal
 import sys
 import time
 from enum import Enum
@@ -170,9 +171,12 @@ class TaskManager:
                 await self.resume_current_task()
             self._current_task.cancel()
             try:
-                await self._current_task
+                # 添加取消超时保护
+                await asyncio.wait_for(self._current_task, timeout=5.0)
             except asyncio.CancelledError:
                 pass
+            except asyncio.TimeoutError:
+                logger.warning("Task cancellation timeout, forcing cleanup")
             # 不立即调用 end_task()，保留 current_input 用于状态查询
             # 只设置_is_processing 为 False，但保留其他状态
             self._is_processing = False
@@ -925,15 +929,45 @@ class TalkerThinkerApp:
         if hasattr(input_handler, 'set_output_event'):
             input_handler.set_output_event(output_complete_event)
 
+        # 创建关闭事件
+        shutdown_event = asyncio.Event()
+
+        def handle_signal(sig, frame):
+            """处理系统信号"""
+            logger.info(f"Signal {sig} received, initiating shutdown...")
+            shutdown_event.set()
+
+        # 注册信号处理器（仅在非 Windows 平台）
+        import platform
+        if platform.system() != "Windows":
+            signal.signal(signal.SIGTERM, handle_signal)
+            signal.signal(signal.SIGINT, handle_signal)
+
         async def read_input():
             """异步读取用户输入 - 使用 prompt_toolkit"""
             loop = asyncio.get_event_loop()
+            wait_start_time = 0
             while True:
                 try:
+                    # 检测关闭信号
+                    if shutdown_event.is_set():
+                        logger.info("Shutdown signal detected, exiting...")
+                        break
+
                     # 等待输出完成后再显示输入提示
                     # 这确保了输入提示不会在 Talker 输出过程中显示
                     while not output_complete_event.is_set():
+                        # 防止无限等待：如果超过 5 秒未设置，强制继续
+                        if wait_start_time == 0:
+                            wait_start_time = time.time()
+                        elif time.time() - wait_start_time > 5.0:
+                            logger.warning("output_complete_event timeout, forcing continue")
+                            wait_start_time = 0  # 重置
+                            break
                         await asyncio.sleep(0.1)
+
+                    # 重置等待时间
+                    wait_start_time = 0
 
                     # 再次检查事件，避免在等待期间被清除
                     if not output_complete_event.is_set():
@@ -961,6 +995,12 @@ class TalkerThinkerApp:
 
         try:
             while True:
+                # 检测关闭信号
+                if shutdown_event.is_set():
+                    logger.info("Shutdown signal detected in main loop, exiting...")
+                    print("\n正在关闭，请稍候...")
+                    break
+
                 try:
                     # 等待用户输入
                     # 注意：使用 prompt_toolkit 时，输入提示由 prompt_toolkit 自己显示
@@ -1117,6 +1157,9 @@ class TalkerThinkerApp:
 
                 except KeyboardInterrupt:
                     # Ctrl+C 处理
+                    if shutdown_event.is_set():
+                        # 已经收到关闭信号，直接退出
+                        break
                     if self.task_manager.is_processing:
                         print("\n\n⚠️ 正在取消当前任务...")
                         await self.task_manager.cancel_current_task()
